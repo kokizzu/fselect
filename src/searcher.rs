@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use chrono::{DateTime, Local};
+#[cfg(feature = "git")]
 use git2::Repository;
 use lscolors::{LsColors, Style};
 use mp3_metadata::MP3Metadata;
@@ -383,6 +384,7 @@ impl<'a> Searcher<'a> {
                 0,
                 search_archives,
                 apply_gitignore,
+                #[cfg(feature = "git")]
                 Repository::discover(&root_dir).ok().as_ref(),
                 apply_hgignore,
                 apply_dockerignore,
@@ -405,9 +407,11 @@ impl<'a> Searcher<'a> {
                     .map(|f| f.to_string())
                     .collect();
                 let buffer_partitions = self.partitioned_output_buffer.clone();
-
+                let buffer_partitions = buffer_partitions.iter().collect::<Vec<_>>();                 
+                
+                let mut results = vec![];
+                
                 buffer_partitions.iter().for_each(|f| {
-                    let mut buf = WritableBuffer::new();
                     let mut items: Vec<(String, String)> = Vec::new();
 
                     let mut file_map = HashMap::new();
@@ -430,10 +434,67 @@ impl<'a> Searcher<'a> {
                         items.push((field_name, record));
                     }
 
-                    let _ = self.results_writer.write_row(&mut buf, items);
+                    results.push(items);
+                });
 
+                if !self.query.ordering_fields.is_empty() {
+                    let grouping_fields = self
+                        .query
+                        .grouping_fields
+                        .iter()
+                        .map(|f| f.to_string().to_lowercase())
+                        .collect::<Vec<String>>();
+                    let ordering_fields = self
+                        .query
+                        .ordering_fields
+                        .iter()
+                        .map(|f| f.to_string().to_lowercase())
+                        .collect::<Vec<String>>();
+                    let directions = self.query.ordering_asc.clone();
+                    let sorting_indices = ordering_fields
+                        .iter()
+                        .map(|f| {
+                            grouping_fields
+                                .iter()
+                                .position(|g| g == f)
+                                .unwrap_or(0)
+                        })
+                        .collect::<Vec<usize>>();
+
+                    results.sort_by(|a, b| {
+                        sorting_indices
+                            .iter()
+                            .enumerate()
+                            .map(|(idx, i)| {
+                                if let Some(a) = a.get(*i) {
+                                    if let Ok(a) = a.1.parse::<i64>() {
+                                        if let Some(b) = b.get(*i) {
+                                            if let Ok(b) = b.1.parse::<i64>() {
+                                                return if directions[idx] { 
+                                                    a.cmp(&b) 
+                                                } else { 
+                                                    b.cmp(&a) 
+                                                };
+                                            }
+                                        }
+                                    }
+                                }
+                                if directions[idx] { 
+                                    a.get(*i).unwrap().1.cmp(&b.get(*i).unwrap().1) 
+                                } else { 
+                                    b.get(*i).unwrap().1.cmp(&a.get(*i).unwrap().1) 
+                                } 
+                            })
+                            .find(|r| *r != std::cmp::Ordering::Equal)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                }
+
+                results.iter().for_each(|items| {
+                    let mut buf = WritableBuffer::new();
+                    let _ = self.results_writer.write_row(&mut buf, items.to_owned());
                     let _ = write!(std::io::stdout(), "{}", String::from(buf));
-                })
+                });
             } else {
                 let mut buf = WritableBuffer::new();
                 let mut items: Vec<(String, String)> = Vec::new();
@@ -497,6 +558,7 @@ impl<'a> Searcher<'a> {
         root_depth: u32,
         search_archives: bool,
         apply_gitignore: bool,
+        #[cfg(feature = "git")]
         git_repository: Option<&Repository>,
         apply_hgignore: bool,
         apply_dockerignore: bool,
@@ -556,10 +618,14 @@ impl<'a> Searcher<'a> {
                             }
 
                             // Check the path against the filters
+                            #[cfg(feature = "git")]
                             let pass_gitignore = !apply_gitignore
                                 || !(git_repository.is_some() && 
                                     git_repository.unwrap().is_path_ignored(&path)
                                         .unwrap_or(false));
+                            #[cfg(not(feature = "git"))]
+                            let pass_gitignore = true;
+                            
                             let pass_hgignore = !apply_hgignore
                                 || !matches_hgignore_filter(
                                     &self.hgignore_filters,
@@ -622,7 +688,9 @@ impl<'a> Searcher<'a> {
 
                                         if ok && self.ok_to_visit_dir(&entry, file_type) {
                                             if traversal_mode == TraversalMode::Dfs {
+                                                #[cfg(feature = "git")]
                                                 let repo;
+                                                #[cfg(feature = "git")]
                                                 let git_repository = match git_repository {
                                                     Some(repo) => Some(repo),
                                                     None if apply_gitignore => {
@@ -638,6 +706,7 @@ impl<'a> Searcher<'a> {
                                                     base_depth,
                                                     search_archives,
                                                     apply_gitignore,
+                                                    #[cfg(feature = "git")]
                                                     git_repository,
                                                     apply_hgignore,
                                                     apply_dockerignore,
@@ -679,7 +748,9 @@ impl<'a> Searcher<'a> {
         if traversal_mode == Bfs && process_queue {
             while !self.dir_queue.is_empty() {
                 let path = self.dir_queue.pop_front().unwrap();
+                #[cfg(feature = "git")]
                 let repo;
+                #[cfg(feature = "git")]
                 let git_repository = match git_repository {
                     Some(repo) => Some(repo),
                     None if apply_gitignore => {
@@ -695,6 +766,7 @@ impl<'a> Searcher<'a> {
                     base_depth,
                     search_archives,
                     apply_gitignore,
+                    #[cfg(feature = "git")]
                     git_repository,
                     apply_hgignore,
                     apply_dockerignore,
