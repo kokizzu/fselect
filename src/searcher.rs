@@ -369,14 +369,19 @@ impl<'a> Searcher<'a> {
             self.dir_queue.clear();
 
             #[cfg(unix)]
+            let hardlinks = root.options.hardlinks;
+            
+            #[cfg(unix)]
             {
-                let metadata = match self.current_follow_symlinks {
-                    true => root_dir.metadata(),
-                    false => symlink_metadata(root_dir),
-                };
-                if let Ok(metadata) = metadata {
-                    self.visited_inodes.insert(metadata.ino());
-                }
+                if hardlinks {
+                    let metadata = match self.current_follow_symlinks {
+                        true => root_dir.metadata(),
+                        false => symlink_metadata(root_dir),
+                    };
+                    if let Ok(metadata) = metadata {
+                        self.visited_inodes.insert(metadata.ino());
+                    }
+                }                
             }
 
             let _result = self.visit_dir(
@@ -392,6 +397,8 @@ impl<'a> Searcher<'a> {
                 apply_dockerignore,
                 traversal_mode,
                 true,
+                #[cfg(unix)]
+                hardlinks,
             );
         }
 
@@ -572,6 +579,8 @@ impl<'a> Searcher<'a> {
         apply_dockerignore: bool,
         traversal_mode: TraversalMode,
         process_queue: bool,
+        #[cfg(unix)]
+        hardlinks: bool,
     ) -> io::Result<()> {
         // Prevents infinite loops when following symlinks
         if self.current_follow_symlinks {
@@ -630,7 +639,7 @@ impl<'a> Searcher<'a> {
                                 #[cfg(feature = "git")]
                                 let pass_gitignore = !apply_gitignore
                                     || !(git_repository.is_some() &&
-                                    git_repository.unwrap().is_path_ignored(&path)
+                                    git_repository.unwrap().is_path_ignored(&canonical_path)
                                         .unwrap_or(false));
                                 #[cfg(not(feature = "git"))]
                                 let pass_gitignore = true;
@@ -700,7 +709,7 @@ impl<'a> Searcher<'a> {
                                             ok = true;
                                         }
 
-                                        if ok && self.ok_to_visit_dir(&entry, file_type) {
+                                        if ok && self.ok_to_visit_dir(&entry, file_type, #[cfg(unix)] hardlinks) {
                                             if traversal_mode == TraversalMode::Dfs {
                                                 #[cfg(feature = "git")]
                                                 let repo;
@@ -726,6 +735,8 @@ impl<'a> Searcher<'a> {
                                                     apply_dockerignore,
                                                     traversal_mode,
                                                     false,
+                                                    #[cfg(unix)]
+                                                    hardlinks,
                                                 );
 
                                                 if result.is_err() {
@@ -786,6 +797,8 @@ impl<'a> Searcher<'a> {
                     apply_dockerignore,
                     traversal_mode,
                     false,
+                    #[cfg(unix)]
+                    hardlinks,
                 );
 
                 if result.is_err() {
@@ -799,12 +812,14 @@ impl<'a> Searcher<'a> {
     }
 
     #[cfg(unix)]
-    fn ok_to_visit_dir(&mut self, entry: &DirEntry, file_type: FileType) -> bool {
-        let ino = entry.ino();
-        if self.visited_inodes.contains(&ino) {
-            return false;
-        } else {
-            self.visited_inodes.insert(ino);
+    fn ok_to_visit_dir(&mut self, entry: &DirEntry, file_type: FileType, hardlinks: bool) -> bool {
+        if hardlinks {
+            let ino = entry.ino();
+            if self.visited_inodes.contains(&ino) {
+                return false;
+            } else {
+                self.visited_inodes.insert(ino);
+            }
         }
 
         match self.current_follow_symlinks {
@@ -1645,6 +1660,78 @@ impl<'a> Searcher<'a> {
 
                 if let Some(ref exif_info) = self.fms.exif_metadata {
                     if let Some(exif_value) = exif_info.get("ExifVersion") {
+                        return Variant::from_string(exif_value);
+                    }
+                }
+            }
+            Field::ExifExposureTime => {
+                self.fms.update_exif_metadata(entry);
+
+                if let Some(ref exif_info) = self.fms.exif_metadata {
+                    if let Some(exif_value) = exif_info.get("ExposureTime") {
+                        return Variant::from_string(exif_value);
+                    }
+                }
+            }
+            Field::ExifAperture => {
+                self.fms.update_exif_metadata(entry);
+
+                if let Some(ref exif_info) = self.fms.exif_metadata {
+                    if let Some(exif_value) = exif_info.get("ApertureValue") {
+                        return Variant::from_string(exif_value);
+                    }
+                }
+            }
+            Field::ExifShutterSpeed => {
+                self.fms.update_exif_metadata(entry);
+
+                if let Some(ref exif_info) = self.fms.exif_metadata {
+                    if let Some(exif_value) = exif_info.get("ShutterSpeedValue") {
+                        return Variant::from_string(exif_value);
+                    }
+                }
+            }
+            Field::ExifFNumber => {
+                self.fms.update_exif_metadata(entry);
+
+                if let Some(ref exif_info) = self.fms.exif_metadata {
+                    if let Some(exif_value) = exif_info.get("FNumber") {
+                        return Variant::from_string(exif_value);
+                    }
+                }
+            }
+            Field::ExifIsoSpeed => {
+                self.fms.update_exif_metadata(entry);
+
+                if let Some(ref exif_info) = self.fms.exif_metadata {
+                    if let Some(exif_value) = exif_info.get("ISOSpeed") {
+                        return Variant::from_string(exif_value);
+                    }
+                }
+            }
+            Field::ExifFocalLength => {
+                self.fms.update_exif_metadata(entry);
+
+                if let Some(ref exif_info) = self.fms.exif_metadata {
+                    if let Some(exif_value) = exif_info.get("FocalLength") {
+                        return Variant::from_string(exif_value);
+                    }
+                }
+            }
+            Field::ExifLensMake => {
+                self.fms.update_exif_metadata(entry);
+
+                if let Some(ref exif_info) = self.fms.exif_metadata {
+                    if let Some(exif_value) = exif_info.get("LensMake") {
+                        return Variant::from_string(exif_value);
+                    }
+                }
+            }
+            Field::ExifLensModel => {
+                self.fms.update_exif_metadata(entry);
+
+                if let Some(ref exif_info) = self.fms.exif_metadata {
+                    if let Some(exif_value) = exif_info.get("LensModel") {
                         return Variant::from_string(exif_value);
                     }
                 }
