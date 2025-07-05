@@ -2,13 +2,12 @@
 //! Query parsing is handled in the `parser` module
 
 use std::collections::HashSet;
-use std::rc::Rc;
 
 use crate::expr::Expr;
 use crate::field::Field;
 use crate::query::TraversalMode::Bfs;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialOrd, PartialEq, Eq, Hash, Serialize)]
 /// Represents a query to be executed on .
 ///
 pub struct Query {
@@ -19,11 +18,11 @@ pub struct Query {
     /// "where" filter expression
     pub expr: Option<Expr>,
     /// Fields to group by
-    pub grouping_fields: Rc<Vec<Expr>>,
+    pub grouping_fields: Vec<Expr>,
     /// Fields to order by
-    pub ordering_fields: Rc<Vec<Expr>>,
+    pub ordering_fields: Vec<Expr>,
     /// Ordering direction (true for asc, false for desc)
-    pub ordering_asc: Rc<Vec<bool>>,
+    pub ordering_asc: Vec<bool>,
     /// Max amount of results to return
     pub limit: u32,
     /// Output format
@@ -50,34 +49,87 @@ impl Query {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialOrd, PartialEq, Eq, Hash, Serialize)]
 /// Represents a root directory to start the search from, with traversal options.
 pub struct Root {
     pub path: String,
     pub options: RootOptions,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-/// Represents the traversal options for a root directory.
-pub struct RootOptions {
-    /// Minimum depth to search
-    pub min_depth: u32,
-    /// Maximum depth to search
-    pub max_depth: u32,
-    /// Whether to search archives
-    pub archives: bool,
-    /// Whether to follow symlinks
-    pub symlinks: bool,
-    /// Whether to respect .gitignore files
-    pub gitignore: Option<bool>,
-    /// Whether to respect .hgignore files
-    pub hgignore: Option<bool>,
-    /// Whether to respect .dockerignore files
-    pub dockerignore: Option<bool>,
-    /// The traversal mode to use
-    pub traversal: TraversalMode,
-    /// Treat the path as a regular expression
-    pub regexp: bool,
+macro_rules! root_options {
+    (
+        $(#[$struct_attrs:meta])*
+        $vis:vis struct $struct_name:ident {
+            $(
+                $(
+                    @text = [$($text:literal),*], description = $description:literal
+                )+
+                $(#[$field_attrs:meta])*
+                $field_vis:vis $field:ident: $field_type:ty
+            ),*
+            $(,)?
+        }
+    ) => {
+        $(#[$struct_attrs])*
+        $vis struct $struct_name {
+            $(
+                $(#[$field_attrs])*
+                $field_vis $field: $field_type,
+            )*
+        }
+        
+        impl $struct_name {
+            pub fn get_names_and_descriptions() -> Vec<(Vec<&'static str>, &'static str)> {
+                vec![
+                    $(
+                        $(#[$field_attrs])*
+                        $(                         
+                            (vec![$($text,)*], $description),
+                        )+
+                    )*
+                ]
+            }
+        }
+    };
+}
+
+root_options! {
+    #[derive(Debug, Clone, PartialOrd, PartialEq, Eq, Hash, Serialize)]
+    pub struct RootOptions {
+        @text = ["mindepth"], description = "Minimum depth to search"
+        pub min_depth: u32,
+        
+        @text = ["maxdepth", "depth"], description = "Maximum depth to search"
+        pub max_depth: u32,
+        
+        @text = ["archives", "arc"], description = "Whether to search archives"
+        pub archives: bool,
+        
+        @text = ["symlinks", "sym"], description = "Whether to follow symlinks"
+        pub symlinks: bool,
+        
+        @text = ["hardlinks", "hard"], description = "Whether to track hardlinks"
+        pub hardlinks: bool,
+        
+        @text = ["gitignore", "git"], description = "Search respects .gitignore files found"
+        @text = ["nogitignore", "nogit"], description = "Disable .gitignore parsing during the search"
+        pub gitignore: Option<bool>,
+        
+        @text = ["hgignore", "hg"], description = "Search respects .hgignore files found"
+        @text = ["nohgignore", "nohg"], description = "Disable .hgignore parsing during the search"
+        pub hgignore: Option<bool>,
+        
+        @text = ["dockerignore", "docker"], description = "Search respects .dockerignore files found"
+        @text = ["nodockerignore", "nodocker"], description = "Disable .dockerignore parsing during the search"
+        pub dockerignore: Option<bool>,
+        
+        @text = ["dfs"], description = "Depth-first search mode"
+        @text = ["bfs"], description = "Breadth-first search mode (default)"
+        pub traversal: TraversalMode,
+        
+        @text = ["regexp", "rx"], description = "Treat the path as a regular expression"
+        pub regexp: bool,
+    }
 }
 
 impl RootOptions {
@@ -87,6 +139,7 @@ impl RootOptions {
             max_depth: 0,
             archives: false,
             symlinks: false,
+            hardlinks: false,
             gitignore: None,
             hgignore: None,
             dockerignore: None,
@@ -101,6 +154,7 @@ impl RootOptions {
         max_depth: u32,
         archives: bool,
         symlinks: bool,
+        hardlinks: bool,
         gitignore: Option<bool>,
         hgignore: Option<bool>,
         dockerignore: Option<bool>,
@@ -112,6 +166,7 @@ impl RootOptions {
             max_depth,
             archives,
             symlinks,
+            hardlinks,
             gitignore,
             hgignore,
             dockerignore,
@@ -141,34 +196,79 @@ impl Root {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialOrd, PartialEq, Eq, Hash, Serialize)]
 pub enum TraversalMode {
     Bfs,
     Dfs,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum OutputFormat {
-    Tabs,
-    Lines,
-    List,
-    Csv,
-    Json,
-    Html,
+macro_rules! output_format {
+    (
+        $(#[$enum_attrs:meta])*
+        $vis:vis enum $enum_name:ident {
+            $(
+                @text = $text:literal
+                @description = $description:literal
+                $(#[$variant_attrs:meta])*
+                $variant:ident$(,)?
+            )*
+        }
+    ) => {
+        $(#[$enum_attrs])*
+        $vis enum $enum_name {
+            $(
+                $(#[$variant_attrs])*
+                $variant,
+            )*
+        }
+        
+        impl $enum_name {
+            pub fn from(s: &str) -> Option<OutputFormat> {
+                let s = s.to_lowercase();
+                match s.as_str() {
+                    $(
+                        $text => Some($enum_name::$variant),
+                    )*
+                    _ => None,
+                }
+            }
+            
+            pub fn get_names_and_descriptions() -> Vec<(&'static str, &'static str)> {
+                vec![
+                    $(
+                        ($text, $description),
+                    )*
+                ]
+            }
+        }
+    };
 }
 
-impl OutputFormat {
-    pub fn from(s: &str) -> Option<OutputFormat> {
-        let s = s.to_lowercase();
-
-        match s.as_str() {
-            "lines" => Some(OutputFormat::Lines),
-            "list" => Some(OutputFormat::List),
-            "csv" => Some(OutputFormat::Csv),
-            "json" => Some(OutputFormat::Json),
-            "tabs" => Some(OutputFormat::Tabs),
-            "html" => Some(OutputFormat::Html),
-            _ => None,
-        }
+output_format! {
+    #[derive(Debug, Clone, PartialOrd, PartialEq, Eq, Hash, Serialize)]
+    pub enum OutputFormat {
+        @text = "tabs"
+        @description = "Tab-separated values (default)"
+        Tabs,
+        
+        @text = "lines"
+        @description = "One item per line"
+        Lines,
+        
+        @text = "list"
+        @description = "Entire output onto a single line for xargs"
+        List,
+        
+        @text = "csv"
+        @description = "Comma-separated values"
+        Csv,
+        
+        @text = "json"
+        @description = "JSON format"
+        Json,
+        
+        @text = "html"
+        @description = "HTML format"
+        Html,
     }
 }

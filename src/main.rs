@@ -22,7 +22,12 @@ use rustyline::DefaultEditor;
 use update_informer::{registry, Check};
 
 use crate::config::Config;
+use crate::field::Field;
+use crate::function::Function;
+use crate::lexer::Lexer;
+use crate::output::OutputFormat;
 use crate::parser::Parser;
+use crate::query::RootOptions;
 use crate::searcher::Searcher;
 use crate::util::{error_exit, error_message};
 use crate::util::str_to_bool;
@@ -92,6 +97,26 @@ fn main() -> ExitCode {
         || first_arg.starts_with("/h")
     {
         usage_info(config, default_config, no_color);
+        return ExitCode::SUCCESS;
+    }
+
+    if first_arg.starts_with("--fields") {
+        complete_fields_info();
+        return ExitCode::SUCCESS;
+    }
+
+    if first_arg.starts_with("--functions") {
+        complete_functions_info();
+        return ExitCode::SUCCESS;
+    }
+
+    if first_arg.starts_with("--root-options") {
+        complete_root_options_info();
+        return ExitCode::SUCCESS;
+    }
+
+    if first_arg.starts_with("--output-formats") {
+        complete_output_formats_info();
         return ExitCode::SUCCESS;
     }
 
@@ -205,8 +230,9 @@ fn exec_search(query: Vec<String>, config: &mut Config, default_config: &Config,
         dbg!(&query);
     }
 
-    let mut parser = Parser::new();
-    let query = parser.parse(query, config.debug);
+    let lexer = Lexer::new(query);
+    let mut parser = Parser::new(lexer);
+    let query = parser.parse(config.debug);
 
     if config.debug {
         dbg!(&query);
@@ -318,185 +344,16 @@ Files Detected as Source Code: {is_source}
 Files Detected as Video: {is_video}
 
 Path Options:
-    mindepth N 	                    Minimum search depth. Default is unlimited. Depth 1 means skip one directory level and search further.
-    maxdepth N | depth N 	        Maximum search depth. Default is unlimited. Depth 1 means search the mentioned directory only. Depth 2 means search mentioned directory and its subdirectories.
-    symlinks | sym                  If specified, search process will follow symlinks. Default is not to follow.
-    archives | arc                  Search within archives. Only zip archives are supported. Default is not to include archived content into the search results.
-    gitignore | git                 Search respects .gitignore files found.
-    hgignore | hg                   Search respects .hgignore files found.
-    dockerignore | docker           Search respects .dockerignore files found.
-    nogitignore | nogit             Disable .gitignore parsing during the search.
-    nohgignore | nohg               Disable .hgignore parsing during the search.
-    nodockerignore | nodocker       Disable .dockerignore parsing during the search.
-    dfs 	                        Depth-first search mode.
-    bfs 	                        Breadth-first search mode. This is the default.
-    regexp | rx                     Use regular expressions to search within multiple roots.
+    {}
 
 Regex syntax:
     {}
 
 Column Options:
-    name                            Returns the name (with extension) of the file
-    extension | ext                 Returns the extension of the file
-    path                            Returns the path of the file
-    abspath                         Returns the absolute path of the file
-    directory | dirname | dir       Returns the directory of the file
-    absdir                          Returns the absolute directory of the file
-    size                            Returns the size of the file in bytes
-    fsize | hsize                   Returns the size of the file accompanied with the unit
-    uid                             Returns the UID of the owner
-    gid                             Returns the GID of the owner's group
-
-    accessed                        Returns the time the file was last accessed (YYYY-MM-DD HH:MM:SS)
-    created                         Returns the file creation date (YYYY-MM-DD HH:MM:SS)
-    modified                        Returns the time the file was last modified (YYYY-MM-DD HH:MM:SS)
-
-    is_dir                          Returns a boolean signifying whether the file path is a directory
-    is_file                         Returns a boolean signifying whether the file path is a file
-    is_symlink                      Returns a boolean signifying whether the file path is a symlink
-    is_pipe | is_fifo               Returns a boolean signifying whether the file path is a FIFO or pipe file
-    is_char | is_character          Returns a boolean signifying whether the file path is a character device or character special file
-    is_block                        Returns a boolean signifying whether the file path is a block or block special file
-    is_socket                       Returns a boolean signifying whether the file path is a socket file
-    is_hidden                       Returns a boolean signifying whether the file is a hidden file (e.g., files that start with a dot on *nix)
-    has_xattrs                      Returns a boolean signifying whether the file has extended attributes
-    capabilities | caps             Returns a string describing Linux capabilities assigned to a file
-
-    device (Linux only)             Returns the code of device the file is stored on
-    inode (Linux only)              Returns the number of inode
-    blocks (Linux only)             Returns the number of blocks (256 bytes) the file occupies
-    hardlinks (Linux only)          Returns the number of hardlinks of the file
-
-    mode                            Returns the permissions of the owner, group, and everybody (similar to the first field in `ls -la`)
-
-    user                            Returns the name of the owner for this file
-    user_read                       Returns a boolean signifying whether the file can be read by the owner
-    user_write                      Returns a boolean signifying whether the file can be written by the owner
-    user_exec                       Returns a boolean signifying whether the file can be executed by the owner
-    user_all                        Returns a boolean signifying whether the file can be fully accessed by the owner
-
-    group                           Returns the name of the owner's group for this file
-    group_read                      Returns a boolean signifying whether the file can be read by the owner's group
-    group_write                     Returns a boolean signifying whether the file can be written by the owner's group
-    group_exec                      Returns a boolean signifying whether the file can be executed by the owner's group
-    group_all                       Returns a boolean signifying whether the file can be fully accessed by the group
-
-    other_read                      Returns a boolean signifying whether the file can be read by others
-    other_write                     Returns a boolean signifying whether the file can be written by others
-    other_exec                      Returns a boolean signifying whether the file can be executed by others
-    other_all                       Returns a boolean signifying whether the file can be fully accessed by the others
-
-    suid                            Returns a boolean signifying whether the file permissions have a SUID bit set
-    sgid                            Returns a boolean signifying whether the file permissions have a SGID bit set
-
-    width                           Returns the number of pixels along the width of the photo or MP4 file
-    height                          Returns the number of pixels along the height of the photo or MP4 file
-
-    mime                            Returns MIME type of the file
-    is_binary                       Returns a boolean signifying whether the file has binary contents
-    is_text                         Returns a boolean signifying whether the file has text contents
-    line_count                      Returns a number of lines in a text file
-
-    exif_datetime                   Returns date and time of taken photo
-    exif_altitude | exif_alt        Returns GPS altitude of taken photo
-    exif_latitude | exif_lat        Returns GPS latitude of taken photo
-    exif_longitude | exif_lng       Returns GPS longitude of taken photo
-    exif_make                       Returns name of the camera manufacturer
-    exif_model                      Returns camera model
-    exif_software                   Returns software name with which the photo was taken
-    exif_version                    Returns the version of EXIF metadata
-
-    mp3_title | title               Returns the title of the audio file taken from the file's metadata
-    mp3_album | album               Returns the album name of the audio file taken from the file's metadata
-    mp3_artist | artist             Returns the artist of the audio file taken from the file's metadata
-    mp3_genre | genre               Returns the genre of the audio file taken from the file's metadata
-    mp3_year                        Returns the year of the audio file taken from the file's metadata
-    mp3_freq | freq                 Returns the sampling rate of audio or video file
-    mp3_bitrate | bitrate           Returns the bitrate of the audio file in kbps
-    duration                        Returns the duration of audio file in seconds
-
-    is_shebang                      Returns a boolean signifying whether the file starts with a shebang (#!)
-    is_empty                        Returns a boolean signifying whether the file is empty or the directory is empty
-    is_archive                      Returns a boolean signifying whether the file is an archival file
-    is_audio                        Returns a boolean signifying whether the file is an audio file
-    is_book                         Returns a boolean signifying whether the file is a book
-    is_doc                          Returns a boolean signifying whether the file is a document
-    is_font                         Returns a boolean signifying whether the file is a font file
-    is_image                        Returns a boolean signifying whether the file is an image
-    is_source                       Returns a boolean signifying whether the file is source code
-    is_video                        Returns a boolean signifying whether the file is a video file
-
-    sha1                            Returns SHA-1 digest of a file
-    sha2_256 | sha256               Returns SHA2-256 digest of a file
-    sha2_512 | sha512               Returns SHA2-512 digest of a file
-    sha3_512 | sha3                 Returns SHA-3 digest of a file
+    {}
 
 Functions:
-    Aggregate:
-        AVG                         Returns average of all values
-        COUNT                       Returns number of all values
-        MAX                         Returns maximum value
-        MIN                         Returns minimum value
-        SUM                         Returns sum of all values
-        STDDEV_POP | STDDEV | STD   Population standard deviation, the square root of variance
-        STDDEV_SAMP                 Sample standard deviation, the square root of sample variance
-        VAR_POP | VARIANCE          Population variance
-        VAR_SAMP                    Sample variance
-    Date:
-        CURRENT_DATE | CUR_DATE |
-        CURDATE                     Returns current date
-        DAY                         Returns day of the month
-        MONTH                       Returns month of the year
-        YEAR                        Returns year of the date
-        DOW | DAYOFWEEK             Returns day of the week (1 - Sunday, 2 - Monday, etc.)
-    User:
-        CURRENT_USER                Returns the current username (unix-only)
-        CURRENT_UID                 Returns the current real UID (unix-only)
-        CURRENT_GROUP               Returns the current primary groupname (unix-only)
-        CURRENT_GID                 Returns the current primary GID (unix-only)
-    Xattr:
-        HAS_XATTR                   Used to check if xattr exists (unix-only)
-        XATTR                       Returns value of xattr (unix-only)
-        HAS_CAPABILITIES | HAS_CAPS Check if any Linux capability exists for the file
-        HAS_CAPABILITY or HAS_CAP   Check if given Linux capability exists for the file
-    String:
-        LENGTH | LEN                Returns length of string value
-        LOWER | LOWERCASE | LCASE   Returns lowercase value
-        UPPER | UPPERCASE | UCASE   Returns uppercase value
-        INITCAP                     Returns first letter of each word uppercase, all other letters lowercase
-        TO_BASE64 | BASE64          Returns Base64 digest of a value
-        FROM_BASE64                 Returns decoded value from a Base64 digest
-        LOCATE | POSITION           Returns position of the substring in the string
-        SUBSTRING | SUBSTR          Returns part of the string value
-        REPLACE                     Returns string with substring replaced with another one
-        TRIM                        Returns string with whitespaces at the beginning and the end stripped
-        LTRIM                       Returns string with whitespaces at the beginning stripped
-        RTRIM                       Returns string with whitespaces at the end stripped
-    Japanese string:
-        CONTAINS_JAPANESE           Used to check if string value contains Japanese symbols
-        CONTAINS_KANA               Used to check if string value contains kana symbols
-        CONTAINS_HIRAGANA           Used to check if string value contains hiragana symbols
-        CONTAINS_KATAKANA           Used to check if string value contains katakana symbols
-        CONTAINS_KANJI              Used to check if string value contains kanji symbols
-    Other:
-        BIN                         Returns binary representation of an integer value
-        HEX                         Returns hexadecimal representation of an integer value
-        OCT                         Returns octal representation of an integer value
-        ABS                         Returns absolute value of the number
-        POWER | POW                 Raise the value to the specified power
-        SQRT                        Returns square root of the value
-        LOG                         Returns logarithm of the value
-        LN                          Returns natural logarithm of the value
-        EXP                         Returns e raised to the power of the value
-        LEAST                       Returns the smallest value
-        GREATEST                    Returns the largest value
-        CONTAINS                    Returns true, if file contains string, false if not
-        COALESCE                    Returns first nonempty expression value
-        CONCAT                      Returns concatenated string of expression values
-        CONCAT_WS                   Returns concatenated string of expression values with specified delimiter
-        FORMAT_SIZE                 Returns formatted size of a file
-        FORMAT_TIME | PRETTY_TIME   Returns human-readable durations of time in seconds
-        RANDOM | RAND               Returns random integer (from zero to max int, from zero to arg, or from arg1 to arg2)
+    {}
 
 Expressions:
     Operators:
@@ -519,11 +376,95 @@ Expressions:
         or                          Used as an OR operator for two conditions made with the above operators
 
 Format:
-    tabs (default)                  Outputs each file with its column value(s) on a line with each column value delimited by a tab
-    lines                           Outputs each column value on a new line
-    list                            Outputs entire output onto a single line for xargs
-    csv                             Outputs each file with its column value(s) on a line with each column value delimited by a comma
-    json                            Outputs a JSON array with JSON objects holding the column value(s) of each file
-    html                            Outputs HTML document with table
-    ", Cyan.underline().paint("https://docs.rs/regex/1.10.2/regex/#syntax"));
+    {}
+    ", format_root_options(), 
+        Cyan.underline().paint("https://docs.rs/regex/1.10.2/regex/#syntax"),
+        format_field_usage(),
+        format_function_usage(),
+        format_output_usage()
+    );
+}
+
+fn format_root_options() -> String {
+    RootOptions::get_names_and_descriptions().iter()
+        .map(|(names, description)| names.join(" | ").to_string() + " ".repeat(32 - names.join(" | ").to_string().len()).as_str() + description)
+        .collect::<Vec<_>>().join("\n    ")
+}
+
+fn format_field_usage() -> String {
+    Field::get_names_and_descriptions().iter()
+        .map(|(names, description)| names.join(" | ").to_string() + " ".repeat(if 32 > names.join(" | ").to_string().len() { 32 - names.join(" | ").to_string().len() } else { 1 }).as_str() + description)
+        .collect::<Vec<_>>().join("\n    ")
+}
+
+fn format_function_usage() -> String {
+    let funcs = Function::get_names_and_descriptions();
+    Function::get_groups().iter()
+        .filter(|group| funcs.get(*group).is_some())
+        .map(|group| {
+            let funcs_in_group = funcs.get(*group).unwrap();
+            format!(
+                "{}:\n        {}",
+                group,
+                funcs_in_group
+                    .iter()
+                    .map(|(names, description)| {
+                        names.join(" | ").to_string().to_uppercase() + " ".repeat(if 28 > names.join(" | ").to_string().len() { 28 - names.join(" | ").to_string().len() } else { 1 }).as_str() + description
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n        ")
+            )
+        })
+        .collect::<Vec<_>>().join("\n\n    ")
+}
+
+fn format_output_usage() -> String {
+    OutputFormat::get_names_and_descriptions().iter()
+        .map(|(name, description)| name.to_string() + " ".repeat(32 - name.to_string().len()).as_str() + description)
+        .collect::<Vec<_>>().join("\n    ")
+}
+
+fn complete_fields_info() {
+    println!(
+        "{}",
+        Field::get_names_and_descriptions()
+            .iter()
+            .map(|(names, _)| names.join(" "))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+}
+
+fn complete_functions_info() {
+    println!(
+        "{}",
+        Function::get_names_and_descriptions()
+            .iter()
+            .flat_map(|entry| entry.1.iter())
+            .map(|(names, _)| names.join(" ").to_uppercase())
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+}
+
+fn complete_root_options_info() {
+    println!(
+        "{}",
+        RootOptions::get_names_and_descriptions()
+            .iter()
+            .map(|(names, _)| names.join(" "))
+            .collect::<Vec<_>>()
+            .join(" ")
+    )
+}
+
+fn complete_output_formats_info() {
+    println!(
+        "{}",
+        OutputFormat::get_names_and_descriptions()
+            .iter()
+            .map(|entry| entry.0.to_string())
+            .collect::<Vec<_>>()
+            .join(" ")
+    )
 }
