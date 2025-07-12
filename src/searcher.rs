@@ -174,6 +174,8 @@ pub struct Searcher<'a> {
     current_follow_symlinks: bool,
 
     fms: FileMetadataState,
+    subquery_cache: HashMap<String, Vec<String>>,
+    silent_mode: bool,
 
     pub error_count: i32,
 }
@@ -215,13 +217,15 @@ impl<'a> Searcher<'a> {
             current_follow_symlinks: false,
 
             fms: FileMetadataState::new(),
+            subquery_cache: HashMap::new(),
+            silent_mode: false,
 
             error_count: 0,
         }
     }
 
     pub fn is_buffered(&self) -> bool {
-        self.has_ordering() || self.has_aggregate_column()
+        self.has_ordering() || self.has_aggregate_column() || self.silent_mode
     }
 
     fn has_ordering(&self) -> bool {
@@ -236,9 +240,11 @@ impl<'a> Searcher<'a> {
     pub fn list_search_results(&mut self) -> io::Result<()> {
         let current_dir = std::env::current_dir()?;
 
-        if let Err(e) = self.results_writer.write_header(&mut std::io::stdout()) {
-            if e.kind() == ErrorKind::BrokenPipe {
-                return Ok(());
+        if !self.silent_mode {
+            if let Err(e) = self.results_writer.write_header(&mut std::io::stdout()) {
+                if e.kind() == ErrorKind::BrokenPipe {
+                    return Ok(());
+                }
             }
         }
 
@@ -369,14 +375,19 @@ impl<'a> Searcher<'a> {
             self.dir_queue.clear();
 
             #[cfg(unix)]
+            let hardlinks = root.options.hardlinks;
+            
+            #[cfg(unix)]
             {
-                let metadata = match self.current_follow_symlinks {
-                    true => root_dir.metadata(),
-                    false => symlink_metadata(root_dir),
-                };
-                if let Ok(metadata) = metadata {
-                    self.visited_inodes.insert(metadata.ino());
-                }
+                if hardlinks {
+                    let metadata = match self.current_follow_symlinks {
+                        true => root_dir.metadata(),
+                        false => symlink_metadata(root_dir),
+                    };
+                    if let Ok(metadata) = metadata {
+                        self.visited_inodes.insert(metadata.ino());
+                    }
+                }                
             }
 
             let _result = self.visit_dir(
@@ -392,6 +403,8 @@ impl<'a> Searcher<'a> {
                 apply_dockerignore,
                 traversal_mode,
                 true,
+                #[cfg(unix)]
+                hardlinks,
             );
         }
 
@@ -490,11 +503,13 @@ impl<'a> Searcher<'a> {
                     });
                 }
 
-                results.iter().for_each(|items| {
-                    let mut buf = WritableBuffer::new();
-                    let _ = self.results_writer.write_row(&mut buf, items.to_owned());
-                    let _ = write!(std::io::stdout(), "{}", String::from(buf));
-                });
+                if !self.silent_mode {
+                    results.iter().for_each(|items| {
+                        let mut buf = WritableBuffer::new();
+                        let _ = self.results_writer.write_row(&mut buf, items.to_owned());
+                        let _ = write!(std::io::stdout(), "{}", String::from(buf));
+                    });
+                }
             } else {
                 let mut buf = WritableBuffer::new();
                 let mut items: Vec<(String, String)> = Vec::new();
@@ -514,15 +529,17 @@ impl<'a> Searcher<'a> {
                     items.push((field_name, record));
                 }
 
-                self.results_writer.write_row(&mut buf, items)?;
+                if !self.silent_mode {
+                    self.results_writer.write_row(&mut buf, items)?;
 
-                if let Err(e) = write!(std::io::stdout(), "{}", String::from(buf)) {
-                    if e.kind() == ErrorKind::BrokenPipe {
-                        return Ok(());
+                    if let Err(e) = write!(std::io::stdout(), "{}", String::from(buf)) {
+                        if e.kind() == ErrorKind::BrokenPipe {
+                            return Ok(());
+                        }
                     }
                 }
             }
-        } else if self.is_buffered() {
+        } else if self.is_buffered() && !self.silent_mode {
             let mut first = true;
             for piece in self.output_buffer.values() {
                 if first {
@@ -543,7 +560,9 @@ impl<'a> Searcher<'a> {
             }
         }
 
-        self.results_writer.write_footer(&mut std::io::stdout())?;
+        if !self.silent_mode {
+            self.results_writer.write_footer(&mut std::io::stdout())?;
+        }
 
         let completion_time = std::time::Instant::now();
 
@@ -554,6 +573,25 @@ impl<'a> Searcher<'a> {
         }
 
         Ok(())
+    }
+
+    fn get_list_from_subquery(&mut self, query: Query) -> Vec<String> {
+        let query_str = format!("{:?}", query);
+        if let Some(cached) = self.subquery_cache.get(&query_str) {
+            return cached.clone();
+        }
+
+        let mut sub_searcher = Searcher::new(&query, self.config, self.default_config, self.use_colors);
+        sub_searcher.silent_mode = true;
+        sub_searcher.list_search_results().unwrap_or_default();
+
+        let result_values = sub_searcher.output_buffer.values().iter()
+            .map(|s| s.trim_end().to_string())
+            .collect::<Vec<String>>();
+
+        self.subquery_cache.insert(query_str, result_values.clone());
+
+        result_values
     }
 
     /// Recursively explore directories starting from a given path.
@@ -572,6 +610,8 @@ impl<'a> Searcher<'a> {
         apply_dockerignore: bool,
         traversal_mode: TraversalMode,
         process_queue: bool,
+        #[cfg(unix)]
+        hardlinks: bool,
     ) -> io::Result<()> {
         // Prevents infinite loops when following symlinks
         if self.current_follow_symlinks {
@@ -630,7 +670,7 @@ impl<'a> Searcher<'a> {
                                 #[cfg(feature = "git")]
                                 let pass_gitignore = !apply_gitignore
                                     || !(git_repository.is_some() &&
-                                    git_repository.unwrap().is_path_ignored(&path)
+                                    git_repository.unwrap().is_path_ignored(&canonical_path)
                                         .unwrap_or(false));
                                 #[cfg(not(feature = "git"))]
                                 let pass_gitignore = true;
@@ -700,7 +740,7 @@ impl<'a> Searcher<'a> {
                                             ok = true;
                                         }
 
-                                        if ok && self.ok_to_visit_dir(&entry, file_type) {
+                                        if ok && self.ok_to_visit_dir(&entry, file_type, #[cfg(unix)] hardlinks) {
                                             if traversal_mode == TraversalMode::Dfs {
                                                 #[cfg(feature = "git")]
                                                 let repo;
@@ -726,6 +766,8 @@ impl<'a> Searcher<'a> {
                                                     apply_dockerignore,
                                                     traversal_mode,
                                                     false,
+                                                    #[cfg(unix)]
+                                                    hardlinks,
                                                 );
 
                                                 if result.is_err() {
@@ -786,6 +828,8 @@ impl<'a> Searcher<'a> {
                     apply_dockerignore,
                     traversal_mode,
                     false,
+                    #[cfg(unix)]
+                    hardlinks,
                 );
 
                 if result.is_err() {
@@ -799,12 +843,14 @@ impl<'a> Searcher<'a> {
     }
 
     #[cfg(unix)]
-    fn ok_to_visit_dir(&mut self, entry: &DirEntry, file_type: FileType) -> bool {
-        let ino = entry.ino();
-        if self.visited_inodes.contains(&ino) {
-            return false;
-        } else {
-            self.visited_inodes.insert(ino);
+    fn ok_to_visit_dir(&mut self, entry: &DirEntry, file_type: FileType, hardlinks: bool) -> bool {
+        if hardlinks {
+            let ino = entry.ino();
+            if self.visited_inodes.contains(&ino) {
+                return false;
+            } else {
+                self.visited_inodes.insert(ino);
+            }
         }
 
         match self.current_follow_symlinks {
@@ -1649,6 +1695,78 @@ impl<'a> Searcher<'a> {
                     }
                 }
             }
+            Field::ExifExposureTime => {
+                self.fms.update_exif_metadata(entry);
+
+                if let Some(ref exif_info) = self.fms.exif_metadata {
+                    if let Some(exif_value) = exif_info.get("ExposureTime") {
+                        return Variant::from_string(exif_value);
+                    }
+                }
+            }
+            Field::ExifAperture => {
+                self.fms.update_exif_metadata(entry);
+
+                if let Some(ref exif_info) = self.fms.exif_metadata {
+                    if let Some(exif_value) = exif_info.get("ApertureValue") {
+                        return Variant::from_string(exif_value);
+                    }
+                }
+            }
+            Field::ExifShutterSpeed => {
+                self.fms.update_exif_metadata(entry);
+
+                if let Some(ref exif_info) = self.fms.exif_metadata {
+                    if let Some(exif_value) = exif_info.get("ShutterSpeedValue") {
+                        return Variant::from_string(exif_value);
+                    }
+                }
+            }
+            Field::ExifFNumber => {
+                self.fms.update_exif_metadata(entry);
+
+                if let Some(ref exif_info) = self.fms.exif_metadata {
+                    if let Some(exif_value) = exif_info.get("FNumber") {
+                        return Variant::from_string(exif_value);
+                    }
+                }
+            }
+            Field::ExifIsoSpeed => {
+                self.fms.update_exif_metadata(entry);
+
+                if let Some(ref exif_info) = self.fms.exif_metadata {
+                    if let Some(exif_value) = exif_info.get("ISOSpeed") {
+                        return Variant::from_string(exif_value);
+                    }
+                }
+            }
+            Field::ExifFocalLength => {
+                self.fms.update_exif_metadata(entry);
+
+                if let Some(ref exif_info) = self.fms.exif_metadata {
+                    if let Some(exif_value) = exif_info.get("FocalLength") {
+                        return Variant::from_string(exif_value);
+                    }
+                }
+            }
+            Field::ExifLensMake => {
+                self.fms.update_exif_metadata(entry);
+
+                if let Some(ref exif_info) = self.fms.exif_metadata {
+                    if let Some(exif_value) = exif_info.get("LensMake") {
+                        return Variant::from_string(exif_value);
+                    }
+                }
+            }
+            Field::ExifLensModel => {
+                self.fms.update_exif_metadata(entry);
+
+                if let Some(ref exif_info) = self.fms.exif_metadata {
+                    if let Some(exif_value) = exif_info.get("LensModel") {
+                        return Variant::from_string(exif_value);
+                    }
+                }
+            }
             Field::LineCount => {
                 self.fms.update_line_count(entry);
 
@@ -1839,9 +1957,9 @@ impl<'a> Searcher<'a> {
         if self.is_buffered() {
             self.output_buffer.insert(
                 Criteria::new(
-                    self.query.ordering_fields.clone(),
+                    Rc::new(self.query.ordering_fields.clone()),
                     criteria,
-                    self.query.ordering_asc.clone(),
+                    Rc::new(self.query.ordering_asc.clone()),
                 ),
                 String::from(buf),
             );
@@ -2085,7 +2203,21 @@ impl<'a> Searcher<'a> {
                         Op::In => {
                             let field_value = field_value.to_string();
                             let mut result = false;
-                            for item in expr.clone().right.unwrap().args.unwrap().iter().map(|arg| self.get_column_expr_value(
+                            let right = expr.clone().right.unwrap();
+                            let args = match right.args {
+                                Some(args) => args,
+                                None => {
+                                    if let Some(subquery) = right.subquery {
+                                        self.get_list_from_subquery(*subquery).iter().map(|s| {
+                                            Expr::value(s.clone().to_string())
+                                        }).collect()
+                                    } else {
+                                        vec![]
+                                    }
+                                }
+                            };
+
+                            for item in args.iter().map(|arg| self.get_column_expr_value(
                                 Some(entry),
                                 file_info,
                                 &mut HashMap::new(),
@@ -2132,7 +2264,21 @@ impl<'a> Searcher<'a> {
                         Op::In => {
                             let field_value = field_value.to_int();
                             let mut result = false;
-                            for item in expr.clone().right.unwrap().args.unwrap().iter().map(|arg| self.get_column_expr_value(
+                            let right = expr.clone().right.unwrap();
+                            let args = match right.args {
+                                Some(args) => args,
+                                None => {
+                                    if let Some(subquery) = right.subquery {
+                                        self.get_list_from_subquery(*subquery).iter().map(|s| {
+                                            Expr::value(s.clone().to_string())
+                                        }).collect()
+                                    } else {
+                                        vec![]
+                                    }
+                                }
+                            };
+
+                            for item in args.iter().map(|arg| self.get_column_expr_value(
                                 Some(entry),
                                 file_info,
                                 &mut HashMap::new(),
@@ -2414,7 +2560,6 @@ mod tests {
     use crate::field::Field;
     use crate::function::Function;
     use crate::query::{OutputFormat, Query};
-    use std::rc::Rc;
 
     // Tests for FileMetadataState
     #[test]
@@ -2465,9 +2610,9 @@ mod tests {
             fields: Vec::new(),
             roots: Vec::new(),
             expr: None,
-            grouping_fields: Rc::new(Vec::new()),
-            ordering_fields: Rc::new(Vec::new()),
-            ordering_asc: Rc::new(Vec::new()),
+            grouping_fields: Vec::new(),
+            ordering_fields: Vec::new(),
+            ordering_asc: Vec::new(),
             limit: 0,
             output_format: OutputFormat::Tabs,
         }));
@@ -2485,9 +2630,9 @@ mod tests {
             fields: Vec::new(),
             roots: Vec::new(),
             expr: None,
-            grouping_fields: Rc::new(Vec::new()),
-            ordering_fields: Rc::new(vec![Expr::field(Field::Name)]),
-            ordering_asc: Rc::new(vec![true]),
+            grouping_fields: Vec::new(),
+            ordering_fields: vec![Expr::field(Field::Name)],
+            ordering_asc: vec![true],
             limit: 0,
             output_format: OutputFormat::Tabs,
         }));
@@ -2508,9 +2653,9 @@ mod tests {
             fields: vec![expr],
             roots: Vec::new(),
             expr: None,
-            grouping_fields: Rc::new(Vec::new()),
-            ordering_fields: Rc::new(Vec::new()),
-            ordering_asc: Rc::new(Vec::new()),
+            grouping_fields: Vec::new(),
+            ordering_fields: Vec::new(),
+            ordering_asc: Vec::new(),
             limit: 0,
             output_format: OutputFormat::Tabs,
         }));

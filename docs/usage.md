@@ -36,7 +36,7 @@ It's ok to use any metacharacters in interactive mode.
 ### It's not a real SQL
 
 Directories to search at are listed with comma separators.
-In a real SQL such syntax would make a cross-product. Here it means just search at A, next at B, and so on.
+In a real SQL, such syntax would make a cross-product. Here it means just search at A, next at B, and so on.
 
 You can use curly braces instead of the regular parentheses! This helps to avoid a few of the shell pitfalls a little bit.
 Functions with no arguments don't require parentheses at all.
@@ -53,7 +53,8 @@ Commas for column separation aren't needed as well. Column aliasing (with or wit
 
 `into` keyword specifies output format, not output table.
 
-Joins, unions, and subselects are not supported (yet?).
+Joins and unions are not supported (yet?).
+Subqueries have only limited support.
 
 ### Columns and fields
 
@@ -117,6 +118,14 @@ Joins, unions, and subselects are not supported (yet?).
 | `exif_model`                                 | Returns camera model                                                                                       |                                                               |
 | `exif_software`                              | Returns software name with which the photo was taken                                                       |                                                               |
 | `exif_version`                               | Returns the version of EXIF metadata                                                                       |                                                               |
+| `exif_exposure_time` or `exif_exptime`       | Returns exposure time of the photo taken                                                                   |                                                               |
+| `exif_aperture`                              | Returns aperture value of the photo taken                                                                  |                                                               |
+| `exif_shutter_speed`                         | Returns shutter speed of the photo taken                                                                   |                                                               |
+| `exif_f_number` or `exif_f_num`              | Returns F-number of the photo taken                                                                        |                                                               |
+| `exif_iso_speed` or `exif_iso`               | Returns ISO speed of the photo taken                                                                       |                                                               |
+| `exif_focal_length` or `exif_focal_len`      | Returns focal length of the photo taken                                                                    |                                                               |
+| `exif_lens_make`                             | Returns lens manufacturer used to take the photo                                                           |                                                               |
+| `exif_lens_model`                            | Returns lens model used to take the photo                                                                  |                                                               |
 | `mp3_title` or `title`                       | Returns the title of the audio file taken from the file's metadata                                         |                                                               |
 | `mp3_album` or `album`                       | Returns the album name of the audio file taken from the file's metadata                                    |                                                               |
 | `mp3_artist` or `artist`                     | Returns the artist of the audio file taken from the file's metadata                                        |                                                               |
@@ -287,7 +296,7 @@ Let's try `FORMAT_SIZE` with different format specifiers:
 ### Search roots
 
     path [option N] [option] [option] [option...][, path2 [option...]]
-    
+
 When you put a directory to search at, you can specify some options.
 
 | Option         | Meaning                                                                                                                                                                             |
@@ -295,6 +304,7 @@ When you put a directory to search at, you can specify some options.
 | mindepth N     | Minimum search depth. Default is unlimited. Depth 1 means skip one directory level and search further.                                                                              |
 | maxdepth N     | Maximum search depth. Default is unlimited. Depth 1 means search the mentioned directory only. Depth 2 means search mentioned directory and its subdirectories. Synonym is `depth`. |
 | symlinks       | If specified, search process will follow symlinks. Default is not to follow. Synonym is `sym`.                                                                                      |
+| hardlinks      | If specified, search process will track and ignore hardlinks. `SLOW!` Default is not to track. Synonym is `hard`.                                                                   |
 | archives       | Search within archives. Only zip archives are supported. Default is not to include archived content into the search results. Synonym is `arc`.                                      |
 | gitignore      | Search respects `.gitignore` files found. Synonym is `git`.                                                                                                                         |
 | hgignore       | Search respects `.hgignore` files found. Synonym is `hg`.                                                                                                                           |
@@ -338,15 +348,15 @@ When you put a directory to search at, you can specify some options.
 When you specify inexact date and time with `=` or `!=` operator, **fselect** understands it as an interval.
 
     fselect path from /home/user where modified = 2017-05-01
-    
+
 `2017-05-01` means all day long from 00:00:00 to 23:59:59.
 
     fselect path from /home/user where modified = '2017-05-01 15'
-    
+
 `2017-05-01 15` means one hour from 15:00:00 to 15:59:59.
 
     fselect path from /home/user where modified ne '2017-05-01 15:10'
-    
+
 `2017-05-01 15:10` is a 1-minute interval from 15:10:00 to 15:10:59.
 
 Other operators assume the exact date and time, which could be specified in a freer way:
@@ -450,11 +460,11 @@ Duration is measured in seconds.
 Usual location on Linux:
 
     /home/user_name/.config/fselect/config.toml
-    
+
 On Windows:
-    
+
     C:\Users\user_name\AppData\Roaming\jhspetersson\fselect\config.toml
-    
+
 Fresh config is filled with defaults, feel free to update it.
 
 If no config on the standard paths is found, **fselect** checks its presence next to the executable. 
@@ -470,6 +480,89 @@ This check is disabled by default. To enable it, put
     check_for_updates = true
 
 into the config file.
+
+### Bash completion
+
+**fselect** comes with a bash completion script (`fselect-completion.bash`) that provides tab completion for:
+- Directory paths after the `from` keyword
+- Output formats after the `into` keyword
+- Fields and functions in other contexts
+
+To enable bash completion for **fselect**, you need to install the completion script. The installation method varies depending on your Linux distribution:
+
+#### Ubuntu/Debian and Red Hat/Fedora/CentOS
+
+1. Copy the completion script to the bash completion directory:
+
+```bash
+sudo cp fselect-completion.bash /etc/bash_completion.d/fselect
+```
+
+2. Make the script executable:
+
+```bash
+sudo chmod +x /etc/bash_completion.d/fselect
+```
+
+3. Source the script or restart your shell:
+
+```bash
+source /etc/bash_completion.d/fselect
+```
+
+#### Arch Linux
+
+1. Copy the completion script to the bash completion directory:
+
+```bash
+sudo cp fselect-completion.bash /usr/share/bash-completion/completions/fselect
+```
+
+2. Make the script executable:
+
+```bash
+sudo chmod +x /usr/share/bash-completion/completions/fselect
+```
+
+3. Source the script or restart your shell:
+
+```bash
+source /usr/share/bash-completion/completions/fselect
+```
+
+#### Manual installation (any Linux distribution)
+
+If your distribution doesn't have a standard location for bash completion scripts, or if you don't have root access, you can install the script in your home directory:
+
+1. Create a directory for bash completion scripts if it doesn't exist:
+
+```bash
+mkdir -p ~/.bash_completion.d
+```
+
+2. Copy the completion script to this directory:
+
+```bash
+cp fselect-completion.bash ~/.bash_completion.d/fselect
+```
+
+3. Make the script executable:
+
+```bash
+chmod +x ~/.bash_completion.d/fselect
+```
+
+4. Add the following line to your `~/.bashrc` file:
+
+```bash
+source ~/.bash_completion.d/fselect
+```
+
+5. Source your `~/.bashrc` file or restart your shell:
+
+```bash
+source ~/.bashrc
+```
 
 ### Command-line arguments
 
