@@ -5,7 +5,6 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::fs::{DirEntry, FileType, Metadata};
 use std::io::{ErrorKind, Write};
-use std::ops::Add;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -43,110 +42,95 @@ use crate::util::{Variant, VariantType};
 use crate::util::error::{error_message, path_error_message, SearchError};
 
 struct FileMetadataState {
-    file_metadata_set: bool,
-    file_metadata: Option<Metadata>,
-
-    line_count_set: bool,
-    line_count: Option<usize>,
-
-    dimensions_set: bool,
-    dimensions: Option<Dimensions>,
-
-    duration_set: bool,
-    duration: Option<Duration>,
-
-    mp3_metadata_set: bool,
-    mp3_metadata: Option<MP3Metadata>,
-
-    exif_metadata_set: bool,
-    exif_metadata: Option<HashMap<String, String>>,
+    file_metadata: Option<Option<Metadata>>,
+    line_count: Option<Option<usize>>,
+    dimensions: Option<Option<Dimensions>>,
+    duration: Option<Option<Duration>>,
+    mp3_metadata: Option<Option<MP3Metadata>>,
+    exif_metadata: Option<Option<HashMap<String, String>>>,
 }
 
 impl FileMetadataState {
     fn new() -> FileMetadataState {
         FileMetadataState {
-            file_metadata_set: false,
             file_metadata: None,
-
-            line_count_set: false,
             line_count: None,
-
-            dimensions_set: false,
             dimensions: None,
-
-            duration_set: false,
             duration: None,
-
-            mp3_metadata_set: false,
             mp3_metadata: None,
-
-            exif_metadata_set: false,
             exif_metadata: None,
         }
     }
 
     fn clear(&mut self) {
-        self.file_metadata_set = false;
-        self.file_metadata = None;
-
-        self.line_count_set = false;
-        self.line_count = None;
-
-        self.dimensions_set = false;
-        self.dimensions = None;
-
-        self.duration_set = false;
-        self.duration = None;
-
-        self.mp3_metadata_set = false;
-        self.mp3_metadata = None;
-
-        self.exif_metadata_set = false;
-        self.exif_metadata = None;
+        *self = Self::new();
     }
 
     fn update_file_metadata(&mut self, entry: &DirEntry, follow_symlinks: bool) {
-        if !self.file_metadata_set {
-            self.file_metadata_set = true;
-            self.file_metadata = get_metadata(entry, follow_symlinks);
+        if self.file_metadata.is_none() {
+            self.file_metadata = Some(get_metadata(entry, follow_symlinks));
         }
+    }
+
+    fn get_file_metadata(&self) -> Option<&Metadata> {
+        self.file_metadata.as_ref().and_then(|o| o.as_ref())
+    }
+
+    fn get_file_metadata_as_option(&self) -> &Option<Metadata> {
+        static NONE: Option<Metadata> = None;
+        self.file_metadata.as_ref().unwrap_or(&NONE)
     }
 
     fn update_line_count(&mut self, entry: &DirEntry) {
-        if !self.line_count_set {
-            self.line_count_set = true;
-            self.line_count = get_line_count(entry);
+        if self.line_count.is_none() {
+            self.line_count = Some(get_line_count(entry));
         }
+    }
+
+    fn get_line_count(&self) -> Option<usize> {
+        self.line_count.and_then(|o| o)
     }
 
     fn update_mp3_metadata(&mut self, entry: &DirEntry) {
-        if !self.mp3_metadata_set {
-            self.mp3_metadata_set = true;
-            self.mp3_metadata = get_mp3_metadata(entry);
+        if self.mp3_metadata.is_none() {
+            self.mp3_metadata = Some(get_mp3_metadata(entry));
         }
+    }
+
+    fn get_mp3_metadata(&self) -> Option<&MP3Metadata> {
+        self.mp3_metadata.as_ref().and_then(|o| o.as_ref())
     }
 
     fn update_exif_metadata(&mut self, entry: &DirEntry) {
-        if !self.exif_metadata_set {
-            self.exif_metadata_set = true;
-            self.exif_metadata = get_exif_metadata(entry);
+        if self.exif_metadata.is_none() {
+            self.exif_metadata = Some(get_exif_metadata(entry));
         }
+    }
+
+    fn get_exif_metadata(&self) -> Option<&HashMap<String, String>> {
+        self.exif_metadata.as_ref().and_then(|o| o.as_ref())
     }
 
     fn update_dimensions(&mut self, entry: &DirEntry) {
-        if !self.dimensions_set {
-            self.dimensions_set = true;
-            self.dimensions = get_dimensions(entry.path());
+        if self.dimensions.is_none() {
+            self.dimensions = Some(get_dimensions(entry.path()));
         }
     }
 
-    fn update_duration(&mut self, entry: &DirEntry) {
-        if !self.duration_set {
-            self.update_mp3_metadata(entry);
+    fn get_dimensions(&self) -> Option<&Dimensions> {
+        self.dimensions.as_ref().and_then(|o| o.as_ref())
+    }
 
-            self.duration_set = true;
-            self.duration = get_duration(entry.path(), &self.mp3_metadata);
+    fn update_duration(&mut self, entry: &DirEntry) {
+        if self.duration.is_none() {
+            self.update_mp3_metadata(entry);
+            let mp3_flat = self.mp3_metadata.as_ref().unwrap_or(&None);
+            self.duration = Some(get_duration(entry.path(), mp3_flat));
         }
+    }
+
+    fn get_duration(&self) -> Option<&Duration> {
+        self.duration.as_ref().and_then(|o| o.as_ref())
     }
 }
 
@@ -160,13 +144,14 @@ pub struct Searcher<'a> {
     user_cache: UsersCache,
     regex_cache: HashMap<String, Regex>,
     found: u32,
-    raw_output_buffer: Vec<HashMap<String, String>>,
-    partitioned_output_buffer: Rc<HashMap<Vec<String>, Vec<HashMap<String, String>>>>,
+    accumulators: HashMap<Vec<String>, function::GroupAccumulator>,
     output_buffer: TopN<Criteria<String>, String>,
-    aux_buffer: Vec<String>,
+    ordering_fields_rc: Rc<Vec<Expr>>,
+    ordering_asc_rc: Rc<Vec<bool>>,
 
     record_context: Rc<RefCell<HashMap<String, HashMap<String, String>>>>,
     current_alias: Option<String>,
+    subquery_required_fields: Option<HashMap<Field, String>>,
 
     hgignore_filters: Vec<HgignoreFilter>,
     dockerignore_filters: Vec<DockerignoreFilter>,
@@ -176,6 +161,7 @@ pub struct Searcher<'a> {
     current_follow_symlinks: bool,
 
     fms: FileMetadataState,
+    conforms_map: HashMap<String, String>,
     subquery_cache: HashMap<String, Vec<String>>,
     silent_mode: bool,
 
@@ -217,17 +203,17 @@ impl<'a> Searcher<'a> {
             user_cache: UsersCache::new(),
             regex_cache: HashMap::new(),
             found: 0,
-            raw_output_buffer: vec![],
-            partitioned_output_buffer: Rc::new(HashMap::new()),
+            accumulators: HashMap::new(),
             output_buffer: if limit == 0 {
                 TopN::limitless()
             } else {
                 TopN::new(limit + query.offset)
             },
-            aux_buffer: vec![],
-
+            ordering_fields_rc: Rc::new(query.ordering_fields.clone()),
+            ordering_asc_rc: Rc::new(query.ordering_asc.clone()),
             record_context,
             current_alias: None,
+            subquery_required_fields: None,
 
             hgignore_filters: vec![],
             dockerignore_filters: vec![],
@@ -237,6 +223,7 @@ impl<'a> Searcher<'a> {
             current_follow_symlinks: false,
 
             fms: FileMetadataState::new(),
+            conforms_map: HashMap::new(),
             subquery_cache: HashMap::new(),
             silent_mode: false,
 
@@ -367,6 +354,13 @@ impl<'a> Searcher<'a> {
         for root in roots {
             self.current_follow_symlinks = root.options.symlinks;
             self.current_alias = root.options.alias.clone();
+            self.subquery_required_fields = match (&self.current_alias, &self.query.expr) {
+                (Some(alias), Some(expr)) => {
+                    let fields = expr.get_fields_required_in_subqueries(alias, false);
+                    if fields.is_empty() { None } else { Some(fields) }
+                }
+                _ => None,
+            };
 
             let root_dir = Path::new(&root.path);
             let min_depth = root.options.min_depth;
@@ -428,131 +422,103 @@ impl<'a> Searcher<'a> {
         // ======== Compute results =========
         if self.has_aggregate_column() {
             if !self.query.grouping_fields.is_empty() {
-                if self.partitioned_output_buffer.is_empty() {
-                    self.partitioned_output_buffer = Rc::new(self.partition_output_buffer());
-                }
-
                 let group_keys: Vec<String> = self
                     .query
                     .grouping_fields
                     .iter()
                     .map(|f| f.to_string())
                     .collect();
-                let buffer_partitions = self.partitioned_output_buffer.clone();
-                let buffer_partitions = buffer_partitions.iter().collect::<Vec<_>>();                 
+                let accumulators = std::mem::take(&mut self.accumulators);
 
-                let mut results = vec![];
+                let ordering_fields_rc = self.ordering_fields_rc.clone();
+                let ordering_asc_rc = self.ordering_asc_rc.clone();
+                let field_names: Vec<String> = self.query.fields.iter()
+                    .map(|f| f.to_string().to_lowercase())
+                    .collect();
+                let sorting_indices: Vec<usize> = self.query.ordering_fields.iter()
+                    .map(|f| {
+                        let name = f.to_string().to_lowercase();
+                        field_names.iter().position(|g| g == &name).unwrap_or(0)
+                    })
+                    .collect();
 
-                buffer_partitions.iter().for_each(|f| {
+                let mut grouped_results: TopN<Criteria<String>, Vec<(String, String)>> =
+                    if self.query.limit > 0 {
+                        TopN::new(self.query.limit + self.query.offset)
+                    } else {
+                        TopN::limitless()
+                    };
+
+                for (group_key, group_acc) in &accumulators {
                     let mut items: Vec<(String, String)> = Vec::new();
-
                     let mut file_map = HashMap::new();
                     for (i, k) in group_keys.iter().enumerate() {
-                        file_map.insert(k.clone(), f.0.get(i).unwrap().clone());
+                        file_map.insert(k.clone(), group_key.get(i).cloned().unwrap_or_default());
                     }
-
                     for column_expr in &self.query.fields {
                         if let Ok(value) = self.get_column_expr_value(
-                            None,
-                            &None,
-                            &Path::new(""),
-                            &mut file_map,
-                            Some(f.1),
-                            column_expr
+                            None, &None, &Path::new(""), &mut file_map, Some(group_acc), column_expr,
                         ) {
-                            let record = format!("{}", value);
                             let field_name = column_expr.to_string().to_lowercase();
-                        items.push((field_name, record));
+                            items.push((field_name, value.to_string()));
                         }
                     }
-
-                    results.push(items);
-                });
-
-                if !self.query.ordering_fields.is_empty() {
-                    let ordering_fields = self
-                        .query
-                        .ordering_fields
-                        .iter()
-                        .map(|f| f.to_string().to_lowercase())
-                        .collect::<Vec<String>>();
-                    let directions = self.query.ordering_asc.clone();
-                    let sorting_indices = ordering_fields
-                        .iter()
-                        .map(|f| {
-                            self.query
-                                .fields
-                                .iter()
-                                .map(|f| f.to_string().to_lowercase())
-                                .position(|g| &g == f)
-                                .unwrap_or(0)
-                        })
-                        .collect::<Vec<usize>>();
-
-                    results.sort_by(|a, b| {
-                        sorting_indices
-                            .iter()
-                            .enumerate()
-                            .map(|(idx, i)| {
-                                if let Some(a) = a.get(*i) {
-                                    if let Ok(a) = a.1.parse::<i64>() {
-                                        if let Some(b) = b.get(*i) {
-                                            if let Ok(b) = b.1.parse::<i64>() {
-                                                return if directions[idx] { 
-                                                    a.cmp(&b) 
-                                                } else { 
-                                                    b.cmp(&a) 
-                                                };
-                                            }
-                                        }
-                                    }
-                                }
-                                if directions[idx] { 
-                                    a.get(*i).unwrap().1.cmp(&b.get(*i).unwrap().1) 
-                                } else { 
-                                    b.get(*i).unwrap().1.cmp(&a.get(*i).unwrap().1) 
-                                } 
-                            })
-                            .find(|r| *r != std::cmp::Ordering::Equal)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    });
+                    let criteria_values: Vec<String> = sorting_indices.iter()
+                        .map(|i| items.get(*i).map(|item| item.1.clone()).unwrap_or_default())
+                        .collect();
+                    grouped_results.insert(
+                        Criteria::new(ordering_fields_rc.clone(), criteria_values, ordering_asc_rc.clone()),
+                        items,
+                    );
                 }
 
-                if !self.silent_mode {
-                    results.iter().for_each(|items| {
-                        let mut buf = WritableBuffer::new();
-                        let _ = self.results_writer.write_row(&mut buf, items.to_owned());
-                        let _ = write!(std::io::stdout(), "{}", String::from(buf));
-                    });
+                let mut first = true;
+                for items in grouped_results.iter_values().skip(self.query.offset as usize) {
+                    let mut buf = WritableBuffer::new();
+                    let _ = self.results_writer.write_row(&mut buf, items.clone());
+                    let rendered = String::from(buf);
+                    self.output_buffer.insert(
+                        Criteria::new(Rc::new(vec![]), vec![], Rc::new(vec![])),
+                        rendered.clone(),
+                    );
+                    if !self.silent_mode {
+                        if !first {
+                            let _ = self.results_writer.write_row_separator(&mut std::io::stdout());
+                        }
+                        first = false;
+                        let _ = write!(std::io::stdout(), "{}", rendered);
+                    }
                 }
             } else {
                 let mut buf = WritableBuffer::new();
                 let mut items: Vec<(String, String)> = Vec::new();
-                let mut item_list = vec![];
 
+                let accumulators = std::mem::take(&mut self.accumulators);
+                let empty_acc = function::GroupAccumulator::default();
+                let ungrouped_acc = accumulators.get(&vec![]).unwrap_or(&empty_acc);
                 for column_expr in &self.query.fields {
                     if let Ok(value) = self.get_column_expr_value(
                         None,
                         &None,
                         &Path::new(""),
                         &mut HashMap::new(),
-                        None,
+                        Some(ungrouped_acc),
                         column_expr
                     ) {
-                        let record = format!("{}", value);
                         let field_name = column_expr.to_string().to_lowercase();
-                        items.push((field_name, record.clone()));
-                        item_list.push(record.clone());
+                        items.push((field_name, value.to_string()));
                     }
                 }
 
-                self.output_buffer.clear();
-                self.aux_buffer.extend(item_list);
+                self.results_writer.write_row(&mut buf, items)?;
+                let rendered = String::from(buf);
+                self.output_buffer.insert(
+                    Criteria::new(Rc::new(vec![]), vec![], Rc::new(vec![])),
+                    rendered.clone(),
+                );
 
                 if !self.silent_mode {
-                    self.results_writer.write_row(&mut buf, items)?;
-
-                    if let Err(e) = write!(std::io::stdout(), "{}", String::from(buf)) {
+                    if let Err(e) = write!(std::io::stdout(), "{}", rendered) {
                         if e.kind() == ErrorKind::BrokenPipe {
                             return Ok(());
                         }
@@ -561,7 +527,7 @@ impl<'a> Searcher<'a> {
             }
         } else if self.is_buffered() && !self.silent_mode {
             let mut first = true;
-            for piece in self.output_buffer.values().iter().skip(self.query.offset as usize) {
+            for piece in self.output_buffer.iter_values().skip(self.query.offset as usize) {
                 if first {
                     first = false;
                 } else if let Err(e) = self
@@ -613,14 +579,14 @@ impl<'a> Searcher<'a> {
             self.use_colors
         );
         sub_searcher.silent_mode = !self.config.debug;
-        sub_searcher.list_search_results().unwrap();
+        if let Err(err) = sub_searcher.list_search_results() {
+            err.print();
+            return vec![];
+        }
 
-        let mut result_values = sub_searcher.output_buffer.values().iter()
+        let result_values = sub_searcher.output_buffer.iter_values()
             .map(|s| s.trim_end().to_string())
             .collect::<Vec<String>>();
-        if result_values.is_empty() {
-            result_values = sub_searcher.aux_buffer;
-        }
 
         if ok_to_cache {
             self.subquery_cache.insert(query_str, result_values.clone());
@@ -647,20 +613,17 @@ impl<'a> Searcher<'a> {
         process_queue: bool,
         root_dir: &Path,
     ) -> Result<(), SearchError> {
-        // Canonicalize the path to resolve symlinks and relative paths
-        let canonical_path = crate::util::canonical_path(&dir.to_path_buf());
-        if canonical_path.is_err() {
-            self.error_count += 1;
-            error_message(
-                &dir.to_string_lossy(),
-                String::from("could not canonicalize path: ")
-                    .add(canonical_path.err().unwrap().as_str())
-                    .as_str(),
-            );
-            return Ok(());
-        }
-
-        let canonical_path = canonical_path.unwrap();
+        let canonical_path = match crate::util::canonical_path(&dir.to_path_buf()) {
+            Ok(path) => path,
+            Err(e) => {
+                self.error_count += 1;
+                error_message(
+                    &dir.to_string_lossy(),
+                    &format!("could not canonicalize path: {}", e),
+                );
+                return Ok(());
+            }
+        };
 
         // Prevents infinite loops when following symlinks
         if self.current_follow_symlinks {
@@ -926,7 +889,7 @@ impl<'a> Searcher<'a> {
         file_info: &Option<FileInfo>,
         root_path: &Path,
         file_map: &mut HashMap<String, String>,
-        buffer_data: Option<&Vec<HashMap<String, String>>>,
+        accumulator: Option<&function::GroupAccumulator>,
         column_expr: &Expr,
     ) -> Result<Variant, SearchError> {
         let column_expr_str = column_expr.to_string();
@@ -967,7 +930,9 @@ impl<'a> Searcher<'a> {
 
         if let Some(ref subquery) = column_expr.subquery {
             let mut subquery = subquery.clone();
-            subquery.limit = 1;
+            if subquery.grouping_fields.is_empty() {
+                subquery.limit = 1;
+            }
             let list = self.get_list_from_subquery(*subquery);
             if !list.is_empty() {
                 let result = list.first().unwrap().to_string();
@@ -977,7 +942,7 @@ impl<'a> Searcher<'a> {
 
         if let Some(ref _function) = column_expr.function {
             let result =
-                self.get_function_value(entry, file_info, root_path, file_map, buffer_data, column_expr)?;
+                self.get_function_value(entry, file_info, root_path, file_map, accumulator, column_expr)?;
             file_map.insert(column_expr_str, result.to_string());
             return Ok(result);
         }
@@ -1007,12 +972,12 @@ impl<'a> Searcher<'a> {
 
         if let Some(ref left) = column_expr.left {
             let left_result =
-                self.get_column_expr_value(entry, file_info, root_path, file_map, buffer_data, left)?;
+                self.get_column_expr_value(entry, file_info, root_path, file_map, accumulator, left)?;
 
             if let Some(ref op) = column_expr.arithmetic_op {
                 if let Some(ref right) = column_expr.right {
                     let right_result =
-                        self.get_column_expr_value(entry, file_info, root_path, file_map, buffer_data, right)?;
+                        self.get_column_expr_value(entry, file_info, root_path, file_map, accumulator, right)?;
                         result = op.calc(&left_result, &right_result);
                         file_map.insert(column_expr_str, result.clone()?.to_string());
                 } else {
@@ -1034,7 +999,7 @@ impl<'a> Searcher<'a> {
         file_info: &Option<FileInfo>,
         root_path: &Path,
         file_map: &mut HashMap<String, String>,
-        buffer_data: Option<&Vec<HashMap<String, String>>>,
+        accumulator: Option<&function::GroupAccumulator>,
         column_expr: &Expr,
     ) -> Result<Variant, SearchError> {
         let dummy = Expr::value(String::from(""));
@@ -1048,23 +1013,24 @@ impl<'a> Searcher<'a> {
         let function = &column_expr.function.as_ref().unwrap();
 
         if function.is_aggregate_function() {
-            let _ = self.get_column_expr_value(entry, file_info, root_path, file_map, buffer_data, left_expr)?;
+            let _ = self.get_column_expr_value(entry, file_info, root_path, file_map, accumulator, left_expr)?;
             let buffer_key = left_expr.to_string();
+            let empty_acc = function::GroupAccumulator::default();
             let aggr_result = function::get_aggregate_value(
                 &column_expr.function.as_ref().unwrap(),
-                buffer_data.unwrap_or(&self.raw_output_buffer),
+                accumulator.unwrap_or(&empty_acc),
                 buffer_key,
                 &column_expr.val,
             );
             Ok(Variant::from_string(&aggr_result))
         } else {
             let function_arg =
-                self.get_column_expr_value(entry, file_info, root_path, file_map, buffer_data, left_expr);
+                self.get_column_expr_value(entry, file_info, root_path, file_map, accumulator, left_expr);
             let mut function_args = vec![];
             if let Some(args) = &column_expr.args {
                 for arg in args {
                     let arg_value =
-                        self.get_column_expr_value(entry, file_info, root_path, file_map, buffer_data, arg)?;
+                        self.get_column_expr_value(entry, file_info, root_path, file_map, accumulator, arg)?;
                     function_args.push(arg_value.to_string());
                 }
             }
@@ -1081,29 +1047,6 @@ impl<'a> Searcher<'a> {
         }
     }
 
-    fn partition_output_buffer(&self) -> HashMap<Vec<String>, Vec<HashMap<String, String>>> {
-        let group_fields: Vec<String> = self
-            .query
-            .grouping_fields
-            .iter()
-            .map(|ref expr| expr.to_string())
-            .collect();
-        let mut result: HashMap<Vec<String>, Vec<HashMap<String, String>>> = HashMap::new();
-
-        self.raw_output_buffer.iter().for_each(|item| {
-            let key: Vec<String> = group_fields
-                .iter()
-                .map(|f| item.get(f).unwrap_or(&String::new()).clone())
-                .collect();
-            if result.contains_key(&key) {
-                result.get_mut(&key).unwrap().push(item.clone());
-            } else {
-                result.insert(key, vec![item.clone()]);
-            }
-        });
-
-        result
-    }
 
     fn get_field_value(
         &mut self,
@@ -1126,10 +1069,7 @@ impl<'a> Searcher<'a> {
                     )))
                 }
                 _ => {
-                    Ok(Variant::from_string(&format!(
-                        "{}",
-                        entry.file_name().to_string_lossy()
-                    )))
+                    Ok(Variant::from_string(&entry.file_name().to_string_lossy().to_string()))
                 }
             },
             Field::Filename => return match file_info {
@@ -1173,13 +1113,10 @@ impl<'a> Searcher<'a> {
                 _ => {
                     match entry.path().strip_prefix(root_path) {
                         Ok(stripped_path) => {
-                            Ok(Variant::from_string(&format!(
-                                "{}",
-                                stripped_path.to_string_lossy()
-                            )))
+                            Ok(Variant::from_string(&stripped_path.to_string_lossy().to_string()))
                         }
                         Err(_) => {
-                            Ok(Variant::from_string(&format!("{}", entry.path().to_string_lossy())))
+                            Ok(Variant::from_string(&entry.path().to_string_lossy().to_string()))
                         }
                     }
                 }
@@ -1240,7 +1177,7 @@ impl<'a> Searcher<'a> {
                     self.fms
                         .update_file_metadata(entry, self.current_follow_symlinks);
 
-                    if let Some(ref attrs) = self.fms.file_metadata {
+                    if let Some(attrs) = self.fms.get_file_metadata() {
                         return Ok(Variant::from_int(attrs.len() as i64));
                     }
                 }
@@ -1259,7 +1196,7 @@ impl<'a> Searcher<'a> {
                     self.fms
                         .update_file_metadata(entry, self.current_follow_symlinks);
 
-                    if let Some(ref attrs) = self.fms.file_metadata {
+                    if let Some(attrs) = self.fms.get_file_metadata() {
                         return Ok(Variant::from_string(&format_filesize(
                             attrs.len(),
                             self.config
@@ -1280,7 +1217,7 @@ impl<'a> Searcher<'a> {
                     self.fms
                         .update_file_metadata(entry, self.current_follow_symlinks);
 
-                    if let Some(ref attrs) = self.fms.file_metadata {
+                    if let Some(attrs) = self.fms.get_file_metadata() {
                         return Ok(Variant::from_bool(attrs.is_dir()));
                     }
                 }
@@ -1293,7 +1230,7 @@ impl<'a> Searcher<'a> {
                     self.fms
                         .update_file_metadata(entry, self.current_follow_symlinks);
 
-                    if let Some(ref attrs) = self.fms.file_metadata {
+                    if let Some(attrs) = self.fms.get_file_metadata() {
                         return Ok(Variant::from_bool(attrs.is_file()));
                     }
                 }
@@ -1306,7 +1243,7 @@ impl<'a> Searcher<'a> {
                     self.fms
                         .update_file_metadata(entry, self.current_follow_symlinks);
 
-                    if let Some(ref attrs) = self.fms.file_metadata {
+                    if let Some(attrs) = self.fms.get_file_metadata() {
                         return Ok(Variant::from_bool(attrs.file_type().is_symlink()));
                     }
                 }
@@ -1344,7 +1281,7 @@ impl<'a> Searcher<'a> {
                     self.fms
                         .update_file_metadata(entry, self.current_follow_symlinks);
 
-                    if let Some(ref attrs) = self.fms.file_metadata {
+                    if let Some(attrs) = self.fms.get_file_metadata() {
                         return Ok(Variant::from_int(attrs.dev() as i64));
                     }
                 }
@@ -1357,7 +1294,7 @@ impl<'a> Searcher<'a> {
                     self.fms
                         .update_file_metadata(entry, self.current_follow_symlinks);
 
-                    if let Some(ref attrs) = self.fms.file_metadata {
+                    if let Some(attrs) = self.fms.get_file_metadata() {
                         return Ok(Variant::from_int(attrs.ino() as i64));
                     }
                 }
@@ -1370,7 +1307,7 @@ impl<'a> Searcher<'a> {
                     self.fms
                         .update_file_metadata(entry, self.current_follow_symlinks);
 
-                    if let Some(ref attrs) = self.fms.file_metadata {
+                    if let Some(attrs) = self.fms.get_file_metadata() {
                         return Ok(Variant::from_int(attrs.blocks() as i64));
                     }
                 }
@@ -1383,7 +1320,7 @@ impl<'a> Searcher<'a> {
                     self.fms
                         .update_file_metadata(entry, self.current_follow_symlinks);
 
-                    if let Some(ref attrs) = self.fms.file_metadata {
+                    if let Some(attrs) = self.fms.get_file_metadata() {
                         return Ok(Variant::from_int(attrs.nlink() as i64));
                     }
                 }
@@ -1400,7 +1337,7 @@ impl<'a> Searcher<'a> {
                     self.fms
                         .update_file_metadata(entry, self.current_follow_symlinks);
 
-                    if let Some(ref attrs) = self.fms.file_metadata {
+                    if let Some(attrs) = self.fms.get_file_metadata() {
                         return Ok(Variant::from_string(&mode::get_mode(attrs)));
                     }
                 }
@@ -1535,7 +1472,7 @@ impl<'a> Searcher<'a> {
 
                     return Ok(Variant::from_bool(is_hidden(
                         &entry.file_name().to_string_lossy(),
-                        &self.fms.file_metadata,
+                        self.fms.get_file_metadata_as_option(),
                         false,
                     )));
                 }
@@ -1544,7 +1481,7 @@ impl<'a> Searcher<'a> {
                 self.fms
                     .update_file_metadata(entry, self.current_follow_symlinks);
 
-                if let Some(ref attrs) = self.fms.file_metadata {
+                if let Some(attrs) = self.fms.get_file_metadata() {
                     if let Some(uid) = mode::get_uid(attrs) {
                         return Ok(Variant::from_int(uid as i64));
                     }
@@ -1554,7 +1491,7 @@ impl<'a> Searcher<'a> {
                 self.fms
                     .update_file_metadata(entry, self.current_follow_symlinks);
 
-                if let Some(ref attrs) = self.fms.file_metadata {
+                if let Some(attrs) = self.fms.get_file_metadata() {
                     if let Some(gid) = mode::get_gid(attrs) {
                         return Ok(Variant::from_int(gid as i64));
                     }
@@ -1565,7 +1502,7 @@ impl<'a> Searcher<'a> {
                 self.fms
                     .update_file_metadata(entry, self.current_follow_symlinks);
 
-                if let Some(ref attrs) = self.fms.file_metadata {
+                if let Some(attrs) = self.fms.get_file_metadata() {
                     if let Some(uid) = mode::get_uid(attrs) {
                         if let Some(user) = self.user_cache.get_user_by_uid(uid) {
                             return Ok(Variant::from_string(
@@ -1580,7 +1517,7 @@ impl<'a> Searcher<'a> {
                 self.fms
                     .update_file_metadata(entry, self.current_follow_symlinks);
 
-                if let Some(ref attrs) = self.fms.file_metadata {
+                if let Some(attrs) = self.fms.get_file_metadata() {
                     if let Some(gid) = mode::get_gid(attrs) {
                         if let Some(group) = self.user_cache.get_group_by_gid(gid) {
                             return Ok(Variant::from_string(
@@ -1594,7 +1531,7 @@ impl<'a> Searcher<'a> {
                 self.fms
                     .update_file_metadata(entry, self.current_follow_symlinks);
 
-                if let Some(ref attrs) = self.fms.file_metadata {
+                if let Some(attrs) = self.fms.get_file_metadata() {
                     if let Ok(sdt) = attrs.created() {
                         let dt: DateTime<Local> = DateTime::from(sdt);
                         return Ok(Variant::from_datetime(dt.naive_local()));
@@ -1605,7 +1542,7 @@ impl<'a> Searcher<'a> {
                 self.fms
                     .update_file_metadata(entry, self.current_follow_symlinks);
 
-                if let Some(ref attrs) = self.fms.file_metadata {
+                if let Some(attrs) = self.fms.get_file_metadata() {
                     if let Ok(sdt) = attrs.accessed() {
                         let dt: DateTime<Local> = DateTime::from(sdt);
                         return Ok(Variant::from_datetime(dt.naive_local()));
@@ -1623,7 +1560,7 @@ impl<'a> Searcher<'a> {
                     self.fms
                         .update_file_metadata(entry, self.current_follow_symlinks);
 
-                    if let Some(ref attrs) = self.fms.file_metadata {
+                    if let Some(attrs) = self.fms.get_file_metadata() {
                         if let Ok(sdt) = attrs.modified() {
                             let dt: DateTime<Local> = DateTime::from(sdt);
                             return Ok(Variant::from_datetime(dt.naive_local()));
@@ -1737,7 +1674,7 @@ impl<'a> Searcher<'a> {
                     self.fms
                         .update_file_metadata(entry, self.current_follow_symlinks);
 
-                    if let Some(ref attrs) = self.fms.file_metadata {
+                    if let Some(attrs) = self.fms.get_file_metadata() {
                         return match attrs.is_dir() {
                             true => match is_dir_empty(entry) {
                                 Some(result) => Ok(Variant::from_bool(result)),
@@ -1751,42 +1688,42 @@ impl<'a> Searcher<'a> {
             Field::Width => {
                 self.fms.update_dimensions(entry);
 
-                if let Some(Dimensions { width, .. }) = self.fms.dimensions {
+                if let Some(&Dimensions { width, .. }) = self.fms.get_dimensions() {
                     return Ok(Variant::from_int(width as i64));
                 }
             }
             Field::Height => {
                 self.fms.update_dimensions(entry);
 
-                if let Some(Dimensions { height, .. }) = self.fms.dimensions {
+                if let Some(&Dimensions { height, .. }) = self.fms.get_dimensions() {
                     return Ok(Variant::from_int(height as i64));
                 }
             }
             Field::Duration => {
                 self.fms.update_duration(entry);
 
-                if let Some(Duration { length, .. }) = self.fms.duration {
+                if let Some(&Duration { length, .. }) = self.fms.get_duration() {
                     return Ok(Variant::from_int(length as i64));
                 }
             }
             Field::Bitrate => {
                 self.fms.update_mp3_metadata(entry);
 
-                if let Some(ref mp3_info) = self.fms.mp3_metadata {
+                if let Some(mp3_info) = self.fms.get_mp3_metadata() {
                     return Ok(Variant::from_int(mp3_info.frames[0].bitrate as i64));
                 }
             }
             Field::Freq => {
                 self.fms.update_mp3_metadata(entry);
 
-                if let Some(ref mp3_info) = self.fms.mp3_metadata {
+                if let Some(mp3_info) = self.fms.get_mp3_metadata() {
                     return Ok(Variant::from_int(mp3_info.frames[0].sampling_freq as i64));
                 }
             }
             Field::Title => {
                 self.fms.update_mp3_metadata(entry);
 
-                if let Some(ref mp3_info) = self.fms.mp3_metadata {
+                if let Some(mp3_info) = self.fms.get_mp3_metadata() {
                     if let Some(ref mp3_tag) = mp3_info.tag {
                         return Ok(Variant::from_string(&mp3_tag.title));
                     }
@@ -1795,7 +1732,7 @@ impl<'a> Searcher<'a> {
             Field::Artist => {
                 self.fms.update_mp3_metadata(entry);
 
-                if let Some(ref mp3_info) = self.fms.mp3_metadata {
+                if let Some(mp3_info) = self.fms.get_mp3_metadata() {
                     if let Some(ref mp3_tag) = mp3_info.tag {
                         return Ok(Variant::from_string(&mp3_tag.artist));
                     }
@@ -1804,7 +1741,7 @@ impl<'a> Searcher<'a> {
             Field::Album => {
                 self.fms.update_mp3_metadata(entry);
 
-                if let Some(ref mp3_info) = self.fms.mp3_metadata {
+                if let Some(mp3_info) = self.fms.get_mp3_metadata() {
                     if let Some(ref mp3_tag) = mp3_info.tag {
                         return Ok(Variant::from_string(&mp3_tag.album));
                     }
@@ -1813,7 +1750,7 @@ impl<'a> Searcher<'a> {
             Field::Year => {
                 self.fms.update_mp3_metadata(entry);
 
-                if let Some(ref mp3_info) = self.fms.mp3_metadata {
+                if let Some(mp3_info) = self.fms.get_mp3_metadata() {
                     if let Some(ref mp3_tag) = mp3_info.tag {
                         return Ok(Variant::from_int(mp3_tag.year as i64));
                     }
@@ -1822,7 +1759,7 @@ impl<'a> Searcher<'a> {
             Field::Genre => {
                 self.fms.update_mp3_metadata(entry);
 
-                if let Some(ref mp3_info) = self.fms.mp3_metadata {
+                if let Some(mp3_info) = self.fms.get_mp3_metadata() {
                     if let Some(ref mp3_tag) = mp3_info.tag {
                         return Ok(Variant::from_string(&format!("{:?}", mp3_tag.genre)));
                     }
@@ -1831,7 +1768,7 @@ impl<'a> Searcher<'a> {
             Field::ExifDateTime => {
                 self.fms.update_exif_metadata(entry);
 
-                if let Some(ref exif_info) = self.fms.exif_metadata {
+                if let Some(exif_info) = self.fms.get_exif_metadata() {
                     if let Some(exif_value) = exif_info.get("DateTime") {
                         if let Ok(exif_datetime) = parse_datetime(exif_value) {
                             return Ok(Variant::from_datetime(exif_datetime.0));
@@ -1842,7 +1779,7 @@ impl<'a> Searcher<'a> {
             Field::ExifGpsAltitude => {
                 self.fms.update_exif_metadata(entry);
 
-                if let Some(ref exif_info) = self.fms.exif_metadata {
+                if let Some(exif_info) = self.fms.get_exif_metadata() {
                     if let Some(exif_value) = exif_info.get("__Alt") {
                         return Ok(Variant::from_float(exif_value.parse().unwrap_or(0.0)));
                     }
@@ -1851,7 +1788,7 @@ impl<'a> Searcher<'a> {
             Field::ExifGpsLatitude => {
                 self.fms.update_exif_metadata(entry);
 
-                if let Some(ref exif_info) = self.fms.exif_metadata {
+                if let Some(exif_info) = self.fms.get_exif_metadata() {
                     if let Some(exif_value) = exif_info.get("__Lat") {
                         return Ok(Variant::from_float(exif_value.parse().unwrap_or(0.0)));
                     }
@@ -1860,7 +1797,7 @@ impl<'a> Searcher<'a> {
             Field::ExifGpsLongitude => {
                 self.fms.update_exif_metadata(entry);
 
-                if let Some(ref exif_info) = self.fms.exif_metadata {
+                if let Some(exif_info) = self.fms.get_exif_metadata() {
                     if let Some(exif_value) = exif_info.get("__Lng") {
                         return Ok(Variant::from_float(exif_value.parse().unwrap_or(0.0)));
                     }
@@ -1869,7 +1806,7 @@ impl<'a> Searcher<'a> {
             Field::ExifMake => {
                 self.fms.update_exif_metadata(entry);
 
-                if let Some(ref exif_info) = self.fms.exif_metadata {
+                if let Some(exif_info) = self.fms.get_exif_metadata() {
                     if let Some(exif_value) = exif_info.get("Make") {
                         return Ok(Variant::from_string(exif_value));
                     }
@@ -1878,7 +1815,7 @@ impl<'a> Searcher<'a> {
             Field::ExifModel => {
                 self.fms.update_exif_metadata(entry);
 
-                if let Some(ref exif_info) = self.fms.exif_metadata {
+                if let Some(exif_info) = self.fms.get_exif_metadata() {
                     if let Some(exif_value) = exif_info.get("Model") {
                         return Ok(Variant::from_string(exif_value));
                     }
@@ -1887,7 +1824,7 @@ impl<'a> Searcher<'a> {
             Field::ExifSoftware => {
                 self.fms.update_exif_metadata(entry);
 
-                if let Some(ref exif_info) = self.fms.exif_metadata {
+                if let Some(exif_info) = self.fms.get_exif_metadata() {
                     if let Some(exif_value) = exif_info.get("Software") {
                         return Ok(Variant::from_string(exif_value));
                     }
@@ -1896,7 +1833,7 @@ impl<'a> Searcher<'a> {
             Field::ExifVersion => {
                 self.fms.update_exif_metadata(entry);
 
-                if let Some(ref exif_info) = self.fms.exif_metadata {
+                if let Some(exif_info) = self.fms.get_exif_metadata() {
                     if let Some(exif_value) = exif_info.get("ExifVersion") {
                         return Ok(Variant::from_string(exif_value));
                     }
@@ -1905,7 +1842,7 @@ impl<'a> Searcher<'a> {
             Field::ExifExposureTime => {
                 self.fms.update_exif_metadata(entry);
 
-                if let Some(ref exif_info) = self.fms.exif_metadata {
+                if let Some(exif_info) = self.fms.get_exif_metadata() {
                     if let Some(exif_value) = exif_info.get("ExposureTime") {
                         return Ok(Variant::from_string(exif_value));
                     }
@@ -1914,7 +1851,7 @@ impl<'a> Searcher<'a> {
             Field::ExifAperture => {
                 self.fms.update_exif_metadata(entry);
 
-                if let Some(ref exif_info) = self.fms.exif_metadata {
+                if let Some(exif_info) = self.fms.get_exif_metadata() {
                     if let Some(exif_value) = exif_info.get("ApertureValue") {
                         return Ok(Variant::from_string(exif_value));
                     }
@@ -1923,7 +1860,7 @@ impl<'a> Searcher<'a> {
             Field::ExifShutterSpeed => {
                 self.fms.update_exif_metadata(entry);
 
-                if let Some(ref exif_info) = self.fms.exif_metadata {
+                if let Some(exif_info) = self.fms.get_exif_metadata() {
                     if let Some(exif_value) = exif_info.get("ShutterSpeedValue") {
                         return Ok(Variant::from_string(exif_value));
                     }
@@ -1932,7 +1869,7 @@ impl<'a> Searcher<'a> {
             Field::ExifFNumber => {
                 self.fms.update_exif_metadata(entry);
 
-                if let Some(ref exif_info) = self.fms.exif_metadata {
+                if let Some(exif_info) = self.fms.get_exif_metadata() {
                     if let Some(exif_value) = exif_info.get("FNumber") {
                         return Ok(Variant::from_string(exif_value));
                     }
@@ -1941,7 +1878,7 @@ impl<'a> Searcher<'a> {
             Field::ExifIsoSpeed => {
                 self.fms.update_exif_metadata(entry);
 
-                if let Some(ref exif_info) = self.fms.exif_metadata {
+                if let Some(exif_info) = self.fms.get_exif_metadata() {
                     if let Some(exif_value) = exif_info.get("ISOSpeed") {
                         return Ok(Variant::from_string(exif_value));
                     }
@@ -1950,7 +1887,7 @@ impl<'a> Searcher<'a> {
             Field::ExifFocalLength => {
                 self.fms.update_exif_metadata(entry);
 
-                if let Some(ref exif_info) = self.fms.exif_metadata {
+                if let Some(exif_info) = self.fms.get_exif_metadata() {
                     if let Some(exif_value) = exif_info.get("FocalLength") {
                         return Ok( Variant::from_string(exif_value));
                     }
@@ -1959,7 +1896,7 @@ impl<'a> Searcher<'a> {
             Field::ExifLensMake => {
                 self.fms.update_exif_metadata(entry);
 
-                if let Some(ref exif_info) = self.fms.exif_metadata {
+                if let Some(exif_info) = self.fms.get_exif_metadata() {
                     if let Some(exif_value) = exif_info.get("LensMake") {
                         return Ok(Variant::from_string(exif_value));
                     }
@@ -1968,7 +1905,7 @@ impl<'a> Searcher<'a> {
             Field::ExifLensModel => {
                 self.fms.update_exif_metadata(entry);
 
-                if let Some(ref exif_info) = self.fms.exif_metadata {
+                if let Some(exif_info) = self.fms.get_exif_metadata() {
                     if let Some(exif_value) = exif_info.get("LensModel") {
                         return Ok(Variant::from_string(exif_value));
                     }
@@ -1977,7 +1914,7 @@ impl<'a> Searcher<'a> {
             Field::LineCount => {
                 self.fms.update_line_count(entry);
 
-                if let Some(line_count) = self.fms.line_count {
+                if let Some(line_count) = self.fms.get_line_count() {
                     return Ok(Variant::from_int(line_count as i64));
                 }
             }
@@ -1992,7 +1929,7 @@ impl<'a> Searcher<'a> {
                 self.fms
                     .update_file_metadata(entry, self.current_follow_symlinks);
 
-                if let Some(ref meta) = self.fms.file_metadata {
+                if let Some(meta) = self.fms.get_file_metadata() {
                     if meta.is_dir() {
                         return Ok(Variant::from_bool(false));
                     }
@@ -2009,7 +1946,7 @@ impl<'a> Searcher<'a> {
                 self.fms
                     .update_file_metadata(entry, self.current_follow_symlinks);
 
-                if let Some(ref meta) = self.fms.file_metadata {
+                if let Some(meta) = self.fms.get_file_metadata() {
                     if meta.is_dir() {
                         return Ok(Variant::from_bool(false));
                     }
@@ -2103,25 +2040,11 @@ impl<'a> Searcher<'a> {
         Ok(Variant::empty(VariantType::String))
     }
 
-    fn get_required_field_values(&mut self, expr: &Expr, current_alias: &str, entry: &DirEntry, root_path: &Path, file_info: &Option<FileInfo>) -> HashMap<String, Variant> {
-        let mut field_values = HashMap::new();
-
-        let required_fields = expr.get_fields_required_in_subqueries(current_alias, false);
-        if !required_fields.is_empty() {
-            for (field, alias) in required_fields {
-                let field_value = self.get_field_value(entry, file_info, root_path, &field).unwrap_or(Variant::empty(VariantType::String));
-                field_values.insert(alias, field_value);
-            }
-        }
-        
-        field_values
-    }
-    
     fn check_file(&mut self, entry: &DirEntry, root_path: &Path, file_info: &Option<FileInfo>) -> Result<(), SearchError> {
         self.fms.clear();
 
         let mut file_map = HashMap::new();
-        
+
         if let Some(ref current_alias) = self.current_alias.clone() {
             {
                 let mut context = self.record_context.borrow_mut();
@@ -2129,12 +2052,13 @@ impl<'a> Searcher<'a> {
                     ctx.clear();
                 }
             }
-            
-            // prepopulate field cache with values used in subqueries
-            let has_where = self.query.expr.is_some();
-            if has_where {
-                let where_expr = self.query.clone().expr.unwrap().clone();
-                let field_values = self.get_required_field_values(&where_expr, current_alias, entry, root_path, &file_info);
+
+            if let Some(ref required_fields) = self.subquery_required_fields.clone() {
+                let mut field_values = HashMap::new();
+                for (field, alias) in required_fields {
+                    let field_value = self.get_field_value(entry, file_info, root_path, field).unwrap_or(Variant::empty(VariantType::String));
+                    field_values.insert(alias.clone(), field_value);
+                }
 
                 let mut context = self.record_context.borrow_mut();
                 let context_entry = context.entry(current_alias.to_string()).or_insert(HashMap::new());
@@ -2153,16 +2077,30 @@ impl<'a> Searcher<'a> {
 
         self.found += 1;
 
-        let mut buf = WritableBuffer::new();
-        let mut criteria = vec!["".to_string(); self.query.ordering_fields.len()];
-
-        //TODO: do we really need this?
-        for field in self.query.get_all_fields() {
-            file_map.insert(
-                field.to_string(),
-                self.get_field_value(entry, file_info, root_path, &field).unwrap_or(Variant::empty(VariantType::String)).to_string(),
-            );
+        if self.has_aggregate_column() {
+            for field in self.query.get_all_fields() {
+                file_map.insert(
+                    field.to_string(),
+                    self.get_field_value(entry, file_info, root_path, &field).unwrap_or(Variant::empty(VariantType::String)).to_string(),
+                );
+            }
+            for field in self.query.grouping_fields.iter() {
+                if file_map.get(&field.to_string()).is_none() {
+                    self.get_column_expr_value(Some(entry), file_info, root_path, &mut file_map, None, field)?;
+                }
+            }
+            let group_key: Vec<String> = self.query.grouping_fields.iter()
+                .map(|f| file_map.get(&f.to_string()).cloned().unwrap_or_default())
+                .collect();
+            let accumulator = self.accumulators.entry(group_key).or_default();
+            accumulator.increment_count();
+            for (key, value) in &file_map {
+                accumulator.push(key, value);
+            }
+            return Ok(());
         }
+
+        let mut buf = WritableBuffer::new();
 
         if !self.is_buffered() && self.found > 1 {
             self.results_writer.write_row_separator(&mut buf)?;
@@ -2185,12 +2123,7 @@ impl<'a> Searcher<'a> {
             items.push((field.to_string(), value));
         }
 
-        for field in self.query.grouping_fields.iter() {
-            if file_map.get(&field.to_string()).is_none() {
-                self.get_column_expr_value(Some(entry), file_info, root_path, &mut file_map, None, field)?;
-            }
-        }
-
+        let mut criteria = vec!["".to_string(); self.query.ordering_fields.len()];
         for (idx, field) in self.query.ordering_fields.iter().enumerate() {
             criteria[idx] = match file_map.get(&field.to_string()) {
                 Some(record) => record.clone(),
@@ -2205,16 +2138,12 @@ impl<'a> Searcher<'a> {
         if self.is_buffered() {
             self.output_buffer.insert(
                 Criteria::new(
-                    Rc::new(self.query.ordering_fields.clone()),
+                    self.ordering_fields_rc.clone(),
                     criteria,
-                    Rc::new(self.query.ordering_asc.clone()),
+                    self.ordering_asc_rc.clone(),
                 ),
-                String::from(buf).to_string(),
+                String::from(buf),
             );
-
-            if self.has_aggregate_column() {
-                self.raw_output_buffer.push(file_map);
-            }
         } else if let Err(e) = write!(std::io::stdout(), "{}", String::from(buf)) {
             if e.kind() == ErrorKind::BrokenPipe {
                 return Err(SearchError::fatal("broken pipe").with_source("output"));
@@ -2227,7 +2156,7 @@ impl<'a> Searcher<'a> {
     fn colorize(&mut self, value: &str) -> String {
         let style;
 
-        if let Some(ref metadata) = self.fms.file_metadata {
+        if let Some(metadata) = self.fms.get_file_metadata() {
             style = self
                 .lscolors
                 .style_for_path_with_metadata(Path::new(&value), Some(metadata));
@@ -2257,7 +2186,7 @@ impl<'a> Searcher<'a> {
                 self.fms
                     .update_file_metadata(entry, self.current_follow_symlinks);
 
-                if let Some(ref attrs) = self.fms.file_metadata {
+                if let Some(attrs) = self.fms.get_file_metadata() {
                     return Variant::from_bool(mode_func_boxed(attrs));
                 }
             }
@@ -2266,250 +2195,186 @@ impl<'a> Searcher<'a> {
         Variant::from_bool(false)
     }
 
+    fn get_in_args(&mut self, expr: &Expr) -> Vec<Expr> {
+        let right = expr.right.as_ref().unwrap().clone();
+        match right.args {
+            Some(args) => args,
+            None => {
+                if let Some(subquery) = right.subquery {
+                    self.get_list_from_subquery(*subquery).iter().map(|s| {
+                        Expr::value(s.to_string())
+                    }).collect()
+                } else {
+                    vec![]
+                }
+            }
+        }
+    }
+
+    fn check_exists(&mut self, expr: &Expr) -> bool {
+        let right = expr.right.as_ref().unwrap().clone();
+        match right.args {
+            Some(args) => !args.is_empty(),
+            None => {
+                if let Some(mut subquery) = right.subquery {
+                    if subquery.grouping_fields.is_empty() {
+                        subquery.limit = 1;
+                    }
+                    !self.get_list_from_subquery(*subquery).is_empty()
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    fn match_pattern(
+        &mut self,
+        val: String,
+        field_str: &str,
+        converter: fn(&str) -> Result<String, String>,
+        err_prefix: &str,
+    ) -> Result<bool, SearchError> {
+        if let Some(regex) = self.regex_cache.get(&val) {
+            return Ok(regex.is_match(field_str));
+        }
+        match converter(&val) {
+            Ok(pattern) => {
+                match Regex::new(&pattern) {
+                    Ok(regex) => {
+                        let matched = regex.is_match(field_str);
+                        self.regex_cache.insert(val, regex);
+                        Ok(matched)
+                    }
+                    _ => Err(SearchError::normal(format!("{}{}", err_prefix, val)).with_source("expression")),
+                }
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn match_glob(
+        &mut self,
+        val: String,
+        field_str: &str,
+    ) -> Result<bool, SearchError> {
+        if let Some(regex) = self.regex_cache.get(&val) {
+            return Ok(regex.is_match(field_str));
+        }
+        match convert_glob_to_pattern(&val) {
+            Ok(pattern) => {
+                match Regex::new(&pattern) {
+                    Ok(regex) => {
+                        let matched = regex.is_match(field_str);
+                        self.regex_cache.insert(val, regex);
+                        Ok(matched)
+                    }
+                    _ => Ok(val.eq(field_str)),
+                }
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
     fn conforms(&mut self, entry: &DirEntry, file_info: &Option<FileInfo>, root_path: &Path, expr: &Expr) -> Result<bool, SearchError> {
         let mut result = false;
 
         if let Some(ref logical_op) = expr.logical_op {
-            let mut left_result = Ok(false);
-            let mut right_result = Ok(false);
-
-            if let Some(ref left) = expr.left {
-                let left_res = self.conforms(entry, file_info, root_path, left);
-                left_result = left_res;
-            }
-
-            let left_result = left_result?;
+            let left_result = match expr.left {
+                Some(ref left) => self.conforms(entry, file_info, root_path, left)?,
+                None => false,
+            };
 
             match logical_op {
                 LogicalOp::And => {
                     if !left_result {
                         result = false;
                     } else {
-                        if let Some(ref right) = expr.right {
-                            let right_res = self.conforms(entry, file_info, root_path, right);
-                            right_result = right_res;
-                        }
-
-                        result = left_result && right_result?;
+                        result = match expr.right {
+                            Some(ref right) => self.conforms(entry, file_info, root_path, right)?,
+                            None => false,
+                        };
                     }
                 }
                 LogicalOp::Or => {
                     if left_result {
                         result = true;
                     } else {
-                        if let Some(ref right) = expr.right {
-                            let right_res = self.conforms(entry, file_info, root_path, right);
-                            right_result = right_res;
-                        }
-
-                        result = left_result || right_result?;
+                        result = match expr.right {
+                            Some(ref right) => self.conforms(entry, file_info, root_path, right)?,
+                            None => false,
+                        };
                     }
                 }
             }
         } else if let Some(ref op) = expr.op {
+            let mut temp_map = std::mem::take(&mut self.conforms_map);
             let field_value = self.get_column_expr_value(
                 Some(entry),
                 file_info,
                 root_path,
-                &mut HashMap::new(),
+                &mut temp_map,
                 None,
                 expr.left.as_ref().unwrap(),
             )?;
-            let value = self.get_column_expr_value(
-                Some(entry),
-                file_info,
-                root_path,
-                &mut HashMap::new(),
-                None,
-                expr.right.as_ref().unwrap(),
-            )?;
+            temp_map.clear();
+            let value = match op {
+                Op::In | Op::NotIn | Op::Exists | Op::NotExists => Variant::empty(VariantType::String),
+                _ => {
+                    let v = self.get_column_expr_value(
+                        Some(entry),
+                        file_info,
+                        root_path,
+                        &mut temp_map,
+                        None,
+                        expr.right.as_ref().unwrap(),
+                    )?;
+                    temp_map.clear();
+                    v
+                }
+            };
+            self.conforms_map = temp_map;
 
             result = match field_value.get_type() {
                 VariantType::String => {
                     let val = value.to_string();
+                    let field_str = field_value.to_string();
                     match op {
-                        Op::Eq => match is_glob(&val) {
-                            true => {
-                                let regex = self.regex_cache.get(&val);
-                                return match regex {
-                                    Some(regex) => {
-                                        Ok(regex.is_match(&field_value.to_string()))
-                                    }
-                                    None => {
-                                        match convert_glob_to_pattern(&val) {
-                                            Ok(pattern) => {
-                                                let regex = Regex::new(&pattern);
-                                                match regex {
-                                                    Ok(ref regex) => {
-                                                        self.regex_cache.insert(val, regex.clone());
-                                                        Ok(regex.is_match(&field_value.to_string()))
-                                                    }
-                                                    _ => {
-                                                        Ok(val.eq(&field_value.to_string()))
-                                                    }
-                                                }
-                                            },
-                                            Err(e) => {
-                                                Err(e.into())
-                                            }
-                                        }
-                                    }
-                                }
+                        Op::Eq => {
+                            if is_glob(&val) {
+                                return self.match_glob(val, &field_str);
                             }
-                            false => val.eq(&field_value.to_string()),
-                        },
-                        Op::Ne => match is_glob(&val) {
-                            true => {
-                                let regex = self.regex_cache.get(&val);
-                                match regex {
-                                    Some(regex) => {
-                                        return Ok(!regex.is_match(&field_value.to_string()));
-                                    }
-                                    None => {
-                                        return match convert_glob_to_pattern(&val) {
-                                            Ok(pattern) => {
-                                                let regex = Regex::new(&pattern);
-                                                match regex {
-                                                    Ok(ref regex) => {
-                                                        self.regex_cache.insert(val, regex.clone());
-                                                        Ok(!regex.is_match(&field_value.to_string()))
-                                                    }
-                                                    _ => {
-                                                        Ok(val.ne(&field_value.to_string()))
-                                                    }
-                                                }
-                                            },
-                                            Err(e) => {
-                                                Err(e.into())
-                                            }
-                                        }
-                                    }
-                                }
+                            val.eq(&field_str)
+                        }
+                        Op::Ne => {
+                            if is_glob(&val) {
+                                return self.match_glob(val, &field_str).map(|m| !m);
                             }
-                            false => val.ne(&field_value.to_string()),
-                        },
+                            val.ne(&field_str)
+                        }
                         Op::Rx => {
-                            let regex = self.regex_cache.get(&val);
-                            return match regex {
-                                Some(regex) => {
-                                    Ok(regex.is_match(&field_value.to_string()))
-                                }
-                                None => {
-                                    let regex = Regex::new(&val);
-                                    match regex {
-                                        Ok(ref regex) => {
-                                            self.regex_cache.insert(val, regex.clone());
-                                            Ok(regex.is_match(&field_value.to_string()))
-                                        }
-                                        _ => {
-                                            Err(SearchError::normal("Incorrect regex expression: ".to_string() + val.as_str()).with_source("expression"))
-                                        }
-                                    }
-                                }
-                            }
+                            fn identity(s: &str) -> Result<String, String> { Ok(s.to_string()) }
+                            return self.match_pattern(val, &field_str, identity, "Incorrect regex expression: ");
                         }
                         Op::NotRx => {
-                            let regex = self.regex_cache.get(&val);
-                            return match regex {
-                                Some(regex) => {
-                                    Ok(!regex.is_match(&field_value.to_string()))
-                                }
-                                None => {
-                                    let regex = Regex::new(&val);
-                                    match regex {
-                                        Ok(ref regex) => {
-                                            self.regex_cache.insert(val, regex.clone());
-                                            Ok(!regex.is_match(&field_value.to_string()))
-                                        }
-                                        _ => {
-                                            Err(SearchError::normal("Incorrect regex expression: ".to_string() + val.as_str()).with_source("expression"))
-                                        }
-                                    }
-                                }
-                            }
+                            fn identity(s: &str) -> Result<String, String> { Ok(s.to_string()) }
+                            return self.match_pattern(val, &field_str, identity, "Incorrect regex expression: ").map(|m| !m);
                         }
                         Op::Like => {
-                            let regex = self.regex_cache.get(&val);
-                            return match regex {
-                                Some(regex) => {
-                                    Ok(regex.is_match(&field_value.to_string()))
-                                }
-                                None => {
-                                    match convert_like_to_pattern(&val) {
-                                        Ok(pattern) => {
-                                            let regex = Regex::new(&pattern);
-                                            match regex {
-                                                Ok(ref regex) => {
-                                                    self.regex_cache.insert(val, regex.clone());
-                                                    Ok(regex.is_match(&field_value.to_string()))
-                                                }
-                                                _ => {
-                                                    Err(SearchError::normal("Incorrect LIKE expression: ".to_string() + val.as_str()).with_source("expression"))
-                                                }
-                                            }
-                                        },
-                                        Err(e) => {
-                                            Err(e.into())
-                                        }
-                                    }
-                                }
-                            }
+                            return self.match_pattern(val, &field_str, convert_like_to_pattern, "Incorrect LIKE expression: ");
                         }
                         Op::NotLike => {
-                            let regex = self.regex_cache.get(&val);
-                            return match regex {
-                                Some(regex) => {
-                                    Ok(!regex.is_match(&field_value.to_string()))
-                                }
-                                None => {
-                                    match convert_like_to_pattern(&val) {
-                                        Ok(pattern) => {
-                                            let regex = Regex::new(&pattern);
-                                            match regex {
-                                                Ok(ref regex) => {
-                                                    self.regex_cache.insert(val, regex.clone());
-                                                    Ok(!regex.is_match(&field_value.to_string()))
-                                                }
-                                                _ => {
-                                                    Err(SearchError::normal("Incorrect NOT LIKE expression: ".to_string() + val.as_str()).with_source("expression"))
-                                                }
-                                            }
-                                        },
-                                        Err(e) => {
-                                            Err(e.into())
-                                        }
-                                    }
-                                }
-                            }
+                            return self.match_pattern(val, &field_str, convert_like_to_pattern, "Incorrect LIKE expression: ").map(|m| !m);
                         }
-                        Op::Eeq => val.eq(&field_value.to_string()),
-                        Op::Ene => val.ne(&field_value.to_string()),
+                        Op::Eeq => val.eq(&field_str),
+                        Op::Ene => val.ne(&field_str),
                         Op::In => {
-                            let field_value = field_value.to_string();
+                            let args = self.get_in_args(expr);
                             let mut result = false;
-                            let right = expr.clone().right.unwrap();
-                            let args = match right.args {
-                                Some(args) => args,
-                                None => {
-                                    if let Some(subquery) = right.subquery {
-                                        self.get_list_from_subquery(*subquery).iter().map(|s| {
-                                            Expr::value(s.clone().to_string())
-                                        }).collect()
-                                    } else {
-                                        vec![]
-                                    }
-                                }
-                            };
-
                             for item in args.iter().map(|arg| self.get_column_expr_value(
-                                Some(entry),
-                                file_info,
-                                root_path,
-                                &mut HashMap::new(),
-                                None,
-                                arg,
+                                Some(entry), file_info, root_path, &mut HashMap::new(), None, arg,
                             )) {
-                                if item?.to_string().eq(&field_value) {
+                                if item?.to_string().eq(&field_str) {
                                     result = true;
                                     break;
                                 }
@@ -2517,65 +2382,20 @@ impl<'a> Searcher<'a> {
                             result
                         }
                         Op::NotIn => {
-                            let field_value = field_value.to_string();
+                            let args = self.get_in_args(expr);
                             let mut result = true;
-                            let right = expr.clone().right.unwrap();
-                            let args = match right.args {
-                                Some(args) => args,
-                                None => {
-                                    if let Some(subquery) = right.subquery {
-                                        self.get_list_from_subquery(*subquery).iter().map(|s| {
-                                            Expr::value(s.clone().to_string())
-                                        }).collect()
-                                    } else {
-                                        vec![]
-                                    }
-                                }
-                            };
-
                             for item in args.iter().map(|arg| self.get_column_expr_value(
-                                Some(entry),
-                                file_info,
-                                root_path,
-                                &mut HashMap::new(),
-                                None,
-                                arg,
+                                Some(entry), file_info, root_path, &mut HashMap::new(), None, arg,
                             )) {
-                                if item?.to_string().eq(&field_value) {
+                                if item?.to_string().eq(&field_str) {
                                     result = false;
                                     break;
                                 }
                             }
                             result
                         }
-                        Op::Exists => {
-                            let right = expr.clone().right.unwrap();
-                            match right.args {
-                                Some(args) => !args.is_empty(),
-                                None => {
-                                    if let Some(mut subquery) = right.subquery {
-                                        subquery.limit = 1;
-                                        !self.get_list_from_subquery(*subquery).is_empty()
-                                    } else {
-                                        false
-                                    }
-                                }
-                            }
-                        }
-                        Op::NotExists => {
-                            let right = expr.clone().right.unwrap();
-                            match right.args {
-                                Some(args) => args.is_empty(),
-                                None => {
-                                    if let Some(mut subquery) = right.subquery {
-                                        subquery.limit = 1;
-                                        self.get_list_from_subquery(*subquery).is_empty()
-                                    } else {
-                                        true
-                                    }
-                                }
-                            }
-                        }
+                        Op::Exists => self.check_exists(expr),
+                        Op::NotExists => !self.check_exists(expr),
                         _ => false,
                     }
                 }
@@ -2590,31 +2410,13 @@ impl<'a> Searcher<'a> {
                         Op::Lt => int_value < val,
                         Op::Lte => int_value <= val,
                         Op::In => {
-                            let field_value = field_value.to_int();
+                            let field_value = field_value.to_float();
+                            let args = self.get_in_args(expr);
                             let mut result = false;
-                            let right = expr.clone().right.unwrap();
-                            let args = match right.args {
-                                Some(args) => args,
-                                None => {
-                                    if let Some(subquery) = right.subquery {
-                                        self.get_list_from_subquery(*subquery).iter().map(|s| {
-                                            Expr::value(s.clone().to_string())
-                                        }).collect()
-                                    } else {
-                                        vec![]
-                                    }
-                                }
-                            };
-
                             for item in args.iter().map(|arg| self.get_column_expr_value(
-                                Some(entry),
-                                file_info,
-                                root_path,
-                                &mut HashMap::new(),
-                                None,
-                                arg,
+                                Some(entry), file_info, root_path, &mut HashMap::new(), None, arg,
                             )) {
-                                if item?.to_int() == field_value {
+                                if item?.to_float() == field_value {
                                     result = true;
                                     break;
                                 }
@@ -2622,63 +2424,21 @@ impl<'a> Searcher<'a> {
                             result
                         },
                         Op::NotIn => {
-                            let field_value = field_value.to_int();
+                            let field_value = field_value.to_float();
+                            let args = self.get_in_args(expr);
                             let mut result = true;
-                            let right = expr.clone().right.unwrap();
-                            let args = match right.args {
-                                Some(args) => args,
-                                None => {
-                                    if let Some(subquery) = right.subquery {
-                                        self.get_list_from_subquery(*subquery).iter().map(|s| {
-                                            Expr::value(s.clone().to_string())
-                                        }).collect()
-                                    } else {
-                                        vec![]
-                                    }
-                                }
-                            };
-
                             for item in args.iter().map(|arg| self.get_column_expr_value(
-                                Some(entry),
-                                file_info,
-                                root_path,
-                                &mut HashMap::new(),
-                                None,
-                                arg,
+                                Some(entry), file_info, root_path, &mut HashMap::new(), None, arg,
                             )) {
-                                if item?.to_int() == field_value {
+                                if item?.to_float() == field_value {
                                     result = false;
                                     break;
                                 }
                             }
                             result
                         }
-                        Op::Exists => {
-                            let right = expr.clone().right.unwrap();
-                            match right.args {
-                                Some(args) => !args.is_empty(),
-                                None => {
-                                    if let Some(subquery) = right.subquery {
-                                        !self.get_list_from_subquery(*subquery).is_empty()
-                                    } else {
-                                        false
-                                    }
-                                }
-                            }
-                        }
-                        Op::NotExists => {
-                            let right = expr.clone().right.unwrap();
-                            match right.args {
-                                Some(args) => args.is_empty(),
-                                None => {
-                                    if let Some(subquery) = right.subquery {
-                                        self.get_list_from_subquery(*subquery).is_empty()
-                                    } else {
-                                        true
-                                    }
-                                }
-                            }
-                        }
+                        Op::Exists => self.check_exists(expr),
+                        Op::NotExists => !self.check_exists(expr),
                         _ => false,
                     }
                 }
@@ -2694,14 +2454,10 @@ impl<'a> Searcher<'a> {
                         Op::Lte => float_value <= val,
                         Op::In => {
                             let field_value = field_value.to_float();
+                            let args = self.get_in_args(expr);
                             let mut result = false;
-                            for item in expr.clone().right.unwrap().args.unwrap().iter().map(|arg| self.get_column_expr_value(
-                                Some(entry),
-                                file_info,
-                                root_path,
-                                &mut HashMap::new(),
-                                None,
-                                arg,
+                            for item in args.iter().map(|arg| self.get_column_expr_value(
+                                Some(entry), file_info, root_path, &mut HashMap::new(), None, arg,
                             )) {
                                 if item?.to_float() == field_value {
                                     result = true;
@@ -2712,14 +2468,10 @@ impl<'a> Searcher<'a> {
                         },
                         Op::NotIn => {
                             let field_value = field_value.to_float();
+                            let args = self.get_in_args(expr);
                             let mut result = true;
-                            for item in expr.clone().right.unwrap().args.unwrap().iter().map(|arg| self.get_column_expr_value(
-                                Some(entry),
-                                file_info,
-                                root_path,
-                                &mut HashMap::new(),
-                                None,
-                                arg,
+                            for item in args.iter().map(|arg| self.get_column_expr_value(
+                                Some(entry), file_info, root_path, &mut HashMap::new(), None, arg,
                             )) {
                                 if item?.to_float() == field_value {
                                     result = false;
@@ -2728,32 +2480,8 @@ impl<'a> Searcher<'a> {
                             }
                             result
                         }
-                        Op::Exists => {
-                            let right = expr.clone().right.unwrap();
-                            match right.args {
-                                Some(args) => !args.is_empty(),
-                                None => {
-                                    if let Some(subquery) = right.subquery {
-                                        !self.get_list_from_subquery(*subquery).is_empty()
-                                    } else {
-                                        false
-                                    }
-                                }
-                            }
-                        }
-                        Op::NotExists => {
-                            let right = expr.clone().right.unwrap();
-                            match right.args {
-                                Some(args) => args.is_empty(),
-                                None => {
-                                    if let Some(subquery) = right.subquery {
-                                        self.get_list_from_subquery(*subquery).is_empty()
-                                    } else {
-                                        true
-                                    }
-                                }
-                            }
-                        }
+                        Op::Exists => self.check_exists(expr),
+                        Op::NotExists => !self.check_exists(expr),
                         _ => false,
                     }
                 }
@@ -2768,14 +2496,10 @@ impl<'a> Searcher<'a> {
                         Op::Lte => field_value.to_bool() <= val,
                         Op::In => {
                             let field_value = field_value.to_bool();
+                            let args = self.get_in_args(expr);
                             let mut result = false;
-                            for item in expr.clone().right.unwrap().args.unwrap().iter().map(|arg| self.get_column_expr_value(
-                                Some(entry),
-                                file_info,
-                                root_path,
-                                &mut HashMap::new(),
-                                None,
-                                arg,
+                            for item in args.iter().map(|arg| self.get_column_expr_value(
+                                Some(entry), file_info, root_path, &mut HashMap::new(), None, arg,
                             )) {
                                 if item?.to_bool() == field_value {
                                     result = true;
@@ -2786,14 +2510,10 @@ impl<'a> Searcher<'a> {
                         },
                         Op::NotIn => {
                             let field_value = field_value.to_bool();
+                            let args = self.get_in_args(expr);
                             let mut result = true;
-                            for item in expr.clone().right.unwrap().args.unwrap().iter().map(|arg| self.get_column_expr_value(
-                                Some(entry),
-                                file_info,
-                                root_path,
-                                &mut HashMap::new(),
-                                None,
-                                arg,
+                            for item in args.iter().map(|arg| self.get_column_expr_value(
+                                Some(entry), file_info, root_path, &mut HashMap::new(), None, arg,
                             )) {
                                 if item?.to_bool() == field_value {
                                     result = false;
@@ -2802,32 +2522,8 @@ impl<'a> Searcher<'a> {
                             }
                             result
                         }
-                        Op::Exists => {
-                            let right = expr.clone().right.unwrap();
-                            match right.args {
-                                Some(args) => !args.is_empty(),
-                                None => {
-                                    if let Some(subquery) = right.subquery {
-                                        !self.get_list_from_subquery(*subquery).is_empty()
-                                    } else {
-                                        false
-                                    }
-                                }
-                            }
-                        }
-                        Op::NotExists => {
-                            let right = expr.clone().right.unwrap();
-                            match right.args {
-                                Some(args) => args.is_empty(),
-                                None => {
-                                    if let Some(subquery) = right.subquery {
-                                        self.get_list_from_subquery(*subquery).is_empty()
-                                    } else {
-                                        true
-                                    }
-                                }
-                            }
-                        }
+                        Op::Exists => self.check_exists(expr),
+                        Op::NotExists => !self.check_exists(expr),
                         _ => false,
                     }
                 }
@@ -2847,14 +2543,10 @@ impl<'a> Searcher<'a> {
                         Op::Lte => dt <= finish,
                         Op::In => {
                             let field_value = field_value.to_datetime()?.0.and_utc().timestamp();
+                            let args = self.get_in_args(expr);
                             let mut result = false;
-                            for item in expr.clone().right.unwrap().args.unwrap().iter().map(|arg| self.get_column_expr_value(
-                                Some(entry),
-                                file_info,
-                                root_path,
-                                &mut HashMap::new(),
-                                None,
-                                arg,
+                            for item in args.iter().map(|arg| self.get_column_expr_value(
+                                Some(entry), file_info, root_path, &mut HashMap::new(), None, arg,
                             )) {
                                 if item?.to_datetime()?.0.and_utc().timestamp() == field_value {
                                     result = true;
@@ -2865,14 +2557,10 @@ impl<'a> Searcher<'a> {
                         },
                         Op::NotIn => {
                             let field_value = field_value.to_datetime()?.0.and_utc().timestamp();
+                            let args = self.get_in_args(expr);
                             let mut result = true;
-                            for item in expr.clone().right.unwrap().args.unwrap().iter().map(|arg| self.get_column_expr_value(
-                                Some(entry),
-                                file_info,
-                                root_path,
-                                &mut HashMap::new(),
-                                None,
-                                arg,
+                            for item in args.iter().map(|arg| self.get_column_expr_value(
+                                Some(entry), file_info, root_path, &mut HashMap::new(), None, arg,
                             )) {
                                 if item?.to_datetime()?.0.and_utc().timestamp() == field_value {
                                     result = false;
@@ -2881,32 +2569,8 @@ impl<'a> Searcher<'a> {
                             }
                             result
                         }
-                        Op::Exists => {
-                            let right = expr.clone().right.unwrap();
-                            match right.args {
-                                Some(args) => !args.is_empty(),
-                                None => {
-                                    if let Some(subquery) = right.subquery {
-                                        !self.get_list_from_subquery(*subquery).is_empty()
-                                    } else {
-                                        false
-                                    }
-                                }
-                            }
-                        }
-                        Op::NotExists => {
-                            let right = expr.clone().right.unwrap();
-                            match right.args {
-                                Some(args) => args.is_empty(),
-                                None => {
-                                    if let Some(subquery) = right.subquery {
-                                        self.get_list_from_subquery(*subquery).is_empty()
-                                    } else {
-                                        true
-                                    }
-                                }
-                            }
-                        }
+                        Op::Exists => self.check_exists(expr),
+                        Op::NotExists => !self.check_exists(expr),
                         _ => false,
                     }
                 }
@@ -3021,22 +2685,11 @@ mod tests {
     fn test_file_metadata_state_new() {
         let state = FileMetadataState::new();
 
-        assert!(!state.file_metadata_set);
         assert!(state.file_metadata.is_none());
-
-        assert!(!state.line_count_set);
         assert!(state.line_count.is_none());
-
-        assert!(!state.dimensions_set);
         assert!(state.dimensions.is_none());
-
-        assert!(!state.duration_set);
         assert!(state.duration.is_none());
-
-        assert!(!state.mp3_metadata_set);
         assert!(state.mp3_metadata.is_none());
-
-        assert!(!state.exif_metadata_set);
         assert!(state.exif_metadata.is_none());
     }
 
@@ -3044,19 +2697,21 @@ mod tests {
     fn test_file_metadata_state_clear() {
         let mut state = FileMetadataState::new();
 
-        // Set some values
-        state.file_metadata_set = true;
-        state.line_count_set = true;
-        state.dimensions_set = true;
-        state.duration_set = true;
-        state.mp3_metadata_set = true;
-        state.exif_metadata_set = true;
+        state.file_metadata = Some(None);
+        state.line_count = Some(None);
+        state.dimensions = Some(None);
+        state.duration = Some(None);
+        state.mp3_metadata = Some(None);
+        state.exif_metadata = Some(None);
 
-        // Clear the state
         state.clear();
 
-        // Verify all values are reset
-        test_file_metadata_state_new();
+        assert!(state.file_metadata.is_none());
+        assert!(state.line_count.is_none());
+        assert!(state.dimensions.is_none());
+        assert!(state.duration.is_none());
+        assert!(state.mp3_metadata.is_none());
+        assert!(state.exif_metadata.is_none());
     }
 
     fn create_test_searcher() -> Searcher<'static> {
